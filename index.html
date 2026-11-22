@@ -1,0 +1,1807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!--
+  AR PREVIEW ("Hang on my wall") — notes on mobile AR in 2026 and on image CORS
+
+  BROWSER SUPPORT
+  • Android Chrome (and Chromium browsers on ARCore phones): WebXR immersive-ar with hit-test, DOM-overlay UI and anchors. A real plane-detected
+    wall is preferred; ARCore often fails on a plain white wall, so the floor line is accepted as "base of the wall" and the painting is hung at 1.45 m.
+  • iOS Safari / iPadOS: no WebXR immersive-ar on iPhone or iPad, so a camera fallback is used: live video + Three.js overlay + DeviceOrientation (iOS asks for
+    motion permission inside the tap). There is NO depth or position tracking: the wall distance is measured from the phone pitch toward the wall/floor
+    line (phone height assumed 1.4 m) and can be adjusted with − / +. The phone must be rotated, not walked around. Camera needs HTTPS.
+  • Desktop: the button is hidden (no camera + motion sensors).
+  • Scale: real size from a built-in table of famous works, else the museum API (Art Institute of Chicago / The Met), else a size written in a Commons file name,
+    else a default (80 cm long side; 38 cm for ukiyo-e prints; 24 cm for miniatures). The label states "real size" or "estimated size".
+
+  CORS
+  • Every texture is loaded with crossOrigin="anonymous" (THREE.TextureLoader().setCrossOrigin). The picture the gallery already loaded this way is reused for AR
+    (no second request). Art Institute of Chicago (IIIF), The Met and Wikimedia Commons send CORS headers; Internet Archive downloads sometimes do not.
+  • If a picture is not CORS-clean the load fails (or the canvas test reports a tainted image) and a friendly "AR Preview not available for this painting" appears.
+  • Camera and AR resources are created only when the AR button is tapped and are released on exit.
+
+  MULTIPLE PAINTINGS (up to AR_MAX = 5)
+  • AR.list holds the paintings already on the wall; AR.E is the one being placed right now; AR.sel is the selected one.
+  • Each painting has its own group, anchor (WebXR) or position (camera fallback). Move / Remove act on the selected painting; Clear all empties the wall.
+  • Android: tap a painting to select it (ray from the tap). iOS fallback: tap on screen. From the 2nd painting on, the fallback hangs it on the same wall plane as the first.
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="FacePro">
+<meta name="application-name" content="FacePro">
+<meta name="theme-color" content="#7f1ca0">
+<meta name="description" content="Walk a hall of famous portraits and self-portraits, from Leonardo and Rembrandt to Van Gogh and Klimt, with a guided tour and AR.">
+<link rel="manifest" href="facepro.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>FacePro</title>
+<style>
+  :root{--bg:#0e0d0c;--fg:#f3ece0;--gold:#c9a45c;}
+  *{box-sizing:border-box}
+  html,body,button,select,a,#sl,#srch{touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:Georgia,'Times New Roman',serif;overflow:hidden}
+  canvas{position:fixed;left:0;top:0;display:block;width:100%;height:100%;height:100dvh;touch-action:none}
+  .wrap{padding:12px 24px 12px 24px}
+  #intro{position:fixed;left:0;top:0;width:100%;height:100%;height:100dvh;display:flex;background:rgba(10,9,8,.88);z-index:6;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:calc(16px + env(safe-area-inset-top,0px)) calc(16px + env(safe-area-inset-right,0px)) calc(16px + env(safe-area-inset-bottom,0px)) calc(16px + env(safe-area-inset-left,0px));box-sizing:border-box}
+  #intro .card{max-width:420px;margin:auto;padding:22px 22px 20px 22px;border:1px solid var(--gold);background:#161412;text-align:center}
+  #intro h1{margin:0 0 8px 0;font-weight:400;letter-spacing:.08em;color:var(--gold)}
+  #intro p{margin:6px 0;line-height:1.45;color:#d8cfbf;font-size:15px}
+  #intro p.kb{font-size:12px;color:#a99f8e}
+  @media (pointer:coarse){#intro p.kb{display:none}}
+  #enter{min-height:48px;touch-action:manipulation}
+  button{font:inherit;cursor:pointer;background:var(--gold);color:#1b1610;border:0;padding:12px 28px 12px 28px;margin-top:16px;letter-spacing:.08em}
+  #menu{position:fixed;top:0;left:0;right:0;z-index:4;background:linear-gradient(rgba(10,9,8,.94),rgba(10,9,8,.6))}
+  #menu .wrap{padding:calc(10px + env(safe-area-inset-top,0px)) calc(24px + env(safe-area-inset-right,0px)) 6px calc(24px + env(safe-area-inset-left,0px))}
+  #rooms{display:flex;gap:8px;align-items:center;padding:0 0 6px 0}
+  #roomsel{margin:0;padding:8px 12px 8px 12px;font-size:13px;font-family:inherit;letter-spacing:.03em;background:rgba(14,13,12,.72);color:var(--fg);border:1px solid #5c4d30;min-width:0;max-width:62vw;cursor:pointer}
+  #roomsel:hover,#roomsel:focus{border-color:var(--gold)}
+  #roomsel option{background:#161412;color:#d8cfbf}
+  #tour{margin-left:auto}
+  .room{flex:0 0 auto;margin:0;padding:8px 14px 8px 14px;font-size:13px;letter-spacing:.03em;background:transparent;color:var(--fg);border:1px solid #5c4d30;white-space:nowrap}
+  .room:hover{border-color:var(--gold)}
+  .room.on{background:var(--gold);color:#1b1610;border-color:var(--gold)}
+  #status{font-size:12px;color:#b9ae9b;padding:0 0 2px 0}
+  #tourbar{display:none;position:fixed;top:0;left:0;right:0;z-index:4;padding:calc(12px + env(safe-area-inset-top,0px)) calc(24px + env(safe-area-inset-right,0px)) 12px calc(24px + env(safe-area-inset-left,0px));justify-content:flex-end;align-items:center;flex-wrap:wrap;gap:8px 10px;pointer-events:none}
+  #tourbar .room{background:rgba(14,13,12,.72);padding:7px 12px 7px 12px}
+  #tourbar .room:hover{background:var(--gold);color:#1b1610}
+  #tspeed{min-width:34px;text-align:center}
+  #tourbar span{font-size:12px;color:#d8cfbf;text-shadow:0 1px 3px #000}
+  #tourbar button,#tourbar select{pointer-events:auto}
+  #tourbar select{background:rgba(14,13,12,.72);color:var(--fg);border:1px solid #5c4d30;padding:7px 10px 7px 10px;font-size:13px;font-family:inherit;max-width:60vw}
+  #tourbar select:hover{border-color:var(--gold)}
+  #tourbar select option{background:#161412;color:#d8cfbf}
+  .touring #menu{display:none}
+  .touring #tourbar{display:flex}
+  .touring:not(.info-on) #cap,.touring #cap.noinf{display:none !important}
+  .touring #cap a,.touring #cap small{display:none}
+  #hud{padding:0 calc(14px + env(safe-area-inset-left,0px)) 0 calc(14px + env(safe-area-inset-right,0px))}
+  .inf{margin:6px 0 8px 0;font-size:14px;line-height:1.4;color:#d8cfbf}
+  .inf .y{display:block;color:var(--gold);font-size:13px;letter-spacing:.04em;margin-bottom:2px}
+  .inf:empty{display:none}
+  #rooms{flex-wrap:wrap}
+  .langsw{display:inline-flex;border:1px solid #5c4d30;margin:0;background:rgba(14,13,12,.72);pointer-events:auto}
+  .langsw button{margin:0;padding:5px 9px;display:inline-flex;align-items:center;gap:6px;min-height:34px;background:transparent;color:var(--fg);border:0;font-size:12px;letter-spacing:.05em;font-family:inherit}
+  .langsw button.on{background:var(--gold);color:#1b1610}
+  .langsw svg{width:20px;height:14px;display:block;border:1px solid rgba(0,0,0,.35)}
+  #intro .langhost{margin-top:14px}
+  .brand{display:inline-flex;align-items:center;gap:9px;color:var(--gold);text-decoration:none;font-size:20px;font-weight:700;letter-spacing:.06em;padding:4px 6px 4px 0;margin-right:4px;pointer-events:auto;white-space:nowrap}
+  .brand a{color:inherit;text-decoration:none}
+  .brand .bl{display:inline-flex;align-items:center;line-height:0}
+  .brand .bl svg{width:30px;height:30px;display:block;border-radius:7px;box-shadow:0 1px 4px rgba(0,0,0,.45)}
+  #tourbar .brand{margin-right:auto;text-shadow:0 1px 3px #000}
+  #srch{display:none;position:fixed;left:0;top:0;width:100%;height:100%;height:100dvh;z-index:7;background:rgba(14,13,12,.97);box-sizing:border-box;
+    padding:calc(12px + env(safe-area-inset-top,0px)) calc(14px + env(safe-area-inset-right,0px)) calc(12px + env(safe-area-inset-bottom,0px)) calc(14px + env(safe-area-inset-left,0px))}
+  #srch .box{max-width:520px;margin:0 auto;height:100%;display:flex;flex-direction:column}
+  #srch .top{display:flex;gap:8px;align-items:center;padding-bottom:10px}
+  #sq{flex:1;min-width:0;font:inherit;font-size:16px;padding:11px 12px;background:#1d1a16;color:var(--fg);border:1px solid var(--gold);border-radius:0;outline:none;-webkit-appearance:none}
+  #sx{margin:0;min-height:44px}
+  #srnd{display:block;width:100%;margin:0 0 10px 0;min-height:44px;font-size:15px;letter-spacing:.04em;background:transparent;color:var(--gold);border:1px solid var(--gold)}
+  #srnd:hover{background:var(--gold);color:#1b1610}
+  #icn{display:none;position:fixed;left:0;top:0;width:100%;height:100%;height:100dvh;z-index:7;background:rgba(14,13,12,.97);box-sizing:border-box;
+    padding:calc(12px + env(safe-area-inset-top,0px)) calc(24px + env(safe-area-inset-right,0px)) calc(12px + env(safe-area-inset-bottom,0px)) calc(24px + env(safe-area-inset-left,0px))}
+  #icn .box{max-width:520px;margin:0 auto;height:100%;display:flex;flex-direction:column}
+  #icn .top{display:flex;gap:8px;align-items:center;padding-bottom:6px}
+  #icnh{flex:1;min-width:0;font-size:20px;letter-spacing:.08em;color:var(--gold)}
+  #icx{margin:0;min-height:44px}
+  #icn .note{font-size:12px;color:#a99f8e;padding:0 0 10px 0}
+  #icgo{display:block;width:100%;margin:0 0 10px 0;min-height:44px;font-size:15px;letter-spacing:.04em;background:transparent;color:var(--gold);border:1px solid var(--gold)}
+  #icgo:hover{background:var(--gold);color:#1b1610}
+  #icl{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  #icl .pc{display:block;width:100%;text-align:left;padding:11px 8px 11px 12px;border:0;border-bottom:1px solid #2a241c;background:#1a1713;color:#d8cfbf;font:inherit;font-size:14px;margin:0;letter-spacing:0;cursor:pointer}
+  #icl .pc:hover{background:#241f19}
+  #icl .pc small{display:block;color:#a99f8e;font-size:12px}
+  #icl .none{padding:20px 6px;color:#a99f8e}
+  #mus{display:none;position:fixed;left:0;top:0;width:100%;height:100%;height:100dvh;z-index:7;background:rgba(14,13,12,.97);box-sizing:border-box;
+    padding:calc(12px + env(safe-area-inset-top,0px)) calc(24px + env(safe-area-inset-right,0px)) calc(12px + env(safe-area-inset-bottom,0px)) calc(24px + env(safe-area-inset-left,0px))}
+  #mus .box{max-width:520px;margin:0 auto;height:100%;display:flex;flex-direction:column}
+  #mus .top{display:flex;gap:8px;align-items:center;padding-bottom:6px}
+  #mush{flex:1;min-width:0;font-size:20px;letter-spacing:.08em;color:var(--gold)}
+  #musx{margin:0;min-height:44px}
+  #mus .note{font-size:12px;color:#a99f8e;padding:0 0 10px 0}
+  #musgo{display:block;width:100%;margin:0 0 10px 0;min-height:44px;font-size:15px;letter-spacing:.04em;background:transparent;color:var(--gold);border:1px solid var(--gold)}
+  #musgo:hover{background:var(--gold);color:#1b1610}
+  #musl{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  #musl .pc{display:block;width:100%;text-align:left;padding:11px 8px 11px 12px;border:0;border-bottom:1px solid #2a241c;background:#1a1713;color:#d8cfbf;font:inherit;font-size:14px;margin:0;letter-spacing:0;cursor:pointer}
+  #musl .pc:hover{background:#241f19}
+  #musl .pc small{display:block;color:#a99f8e;font-size:12px}
+  #musl .none{padding:20px 6px;color:#a99f8e}
+  #musb{margin:0;min-height:44px;display:none}
+  #mus .cnt{color:#a99f8e;font-size:12px}
+  #sl{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+  #sl .ar{display:flex;justify-content:space-between;gap:10px;padding:13px 6px;border-bottom:1px solid #3a3226;cursor:pointer;color:var(--fg);font-size:16px}
+  #sl .ar span{color:#a99f8e;font-size:13px;white-space:nowrap}
+  #sl .pc{display:block;width:100%;text-align:left;padding:10px 6px 10px 18px;border:0;border-bottom:1px solid #2a241c;background:#1a1713;color:#d8cfbf;font:inherit;font-size:14px;margin:0;letter-spacing:0;cursor:pointer}
+  #sl .pc small{display:block;color:#a99f8e;font-size:12px}
+  #sl .none{padding:20px 6px;color:#a99f8e}
+  #cross{position:fixed;left:50%;top:50%;width:6px;height:6px;margin:-3px 0 0 -3px;border-radius:50%;background:rgba(255,255,255,.7);z-index:3;pointer-events:none}
+  #hud{position:fixed;left:0;right:0;bottom:0;z-index:3;pointer-events:none}
+  #cap{display:none;max-width:560px;margin:0 auto calc(24px + env(safe-area-inset-bottom,0px)) auto;padding:14px 22px 14px 22px;background:rgba(14,13,12,.82);border:1px solid var(--gold);text-align:center;pointer-events:auto}
+  #cap b{display:block;font-size:18px;font-weight:400}
+  #cap a{color:var(--gold);word-break:break-all;font-size:14px}
+  #cap small{color:#a99f8e;display:block;margin-top:4px}
+  #pad{position:fixed;right:0;bottom:0;z-index:4;display:none}
+  #pad .wrap{display:flex;flex-direction:column;gap:10px;padding:12px calc(24px + env(safe-area-inset-right,0px)) calc(12px + env(safe-area-inset-bottom,0px)) 12px}
+  #pad button{margin:0;padding:16px 20px 16px 20px;font-size:20px;opacity:.8}
+  @media (pointer:coarse){#pad{display:block}}
+  @media (max-width:600px){#tourbar{gap:6px 6px} #tourbar .room{padding:6px 9px 6px 9px;font-size:12px} #roomsel{max-width:56vw} #menu .wrap{padding-left:calc(14px + env(safe-area-inset-left,0px));padding-right:calc(14px + env(safe-area-inset-right,0px))} #tourbar{padding-left:calc(14px + env(safe-area-inset-left,0px));padding-right:calc(14px + env(safe-area-inset-right,0px))}}
+  .wa{display:inline-flex;align-items:center;gap:6px;background:#25D366 !important;color:#06351a !important;border-color:#25D366 !important;font-weight:700}
+  .wa:hover{filter:brightness(1.08)}
+  .inst{display:none;margin:12px auto 0 auto;padding:7px 14px;font-size:12px;letter-spacing:.05em;background:transparent;color:var(--gold);border:1px solid #5c4d30}
+  .inst:hover{border-color:var(--gold)}
+  #intro .inst.show{display:inline-block}
+  #minst{display:none}
+  #minst.show{display:inline-block}
+  #iosHint{display:none;font-size:12px !important;color:#a99f8e !important;margin-top:12px !important}
+  #iosHint.show{display:block}
+  #listen{display:none;position:fixed;left:50%;transform:translateX(-50%);bottom:calc(210px + env(safe-area-inset-bottom,0px));z-index:5;margin:0;padding:12px 18px;max-width:calc(100vw - 28px);box-shadow:0 2px 14px rgba(0,0,0,.35)}
+
+  /* ---- phone layout: compact top bar, compact info card, thumb row above the card ---- */
+  .mtog{display:none;margin:0;padding:8px 12px}
+  #hud #pad{position:static;pointer-events:none}
+  #hud #pad .wrap{flex-direction:row;justify-content:flex-end;gap:8px;padding:0 0 8px 0}
+  #hud #pad button{pointer-events:auto;padding:10px 0;width:52px;min-height:46px;font-size:18px;opacity:.92}
+  @media (max-width:700px),(max-height:520px){
+    .mtog{display:inline-block}
+    #rooms:not(.open) .fold,#tourbar:not(.open) .fold{display:none}
+    #rooms:not(.open){flex-wrap:nowrap}
+    #status{display:none}
+    #menu .wrap{padding-bottom:2px}
+    #roomsel{max-width:46vw}
+    #tourbar{justify-content:flex-end}
+  }
+  @media (pointer:coarse),(max-width:700px){
+    #cap{padding:10px 14px;max-height:30vh;overflow-y:auto;-webkit-overflow-scrolling:touch;margin-bottom:calc(10px + env(safe-area-inset-bottom,0px))}
+    #cap b{font-size:16px}
+    .inf{font-size:13px;margin:4px 0 0 0}
+    #cap a,#cap small{display:none}
+  }
+  /* ---- About popup ---- */
+  .abt{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;min-height:0;margin:0 0 0 2px;padding:0 0 0 0;border-radius:50%;background:rgba(14,13,12,.72);color:var(--gold);border:1px solid var(--gold);font:italic 700 17px/1 Georgia,'Times New Roman',serif;letter-spacing:0;cursor:pointer;pointer-events:auto}
+  .abt:hover{background:var(--gold);color:#1b1610}
+  #about{display:none;position:fixed;left:0;top:0;width:100%;height:100%;height:100dvh;z-index:8;background:rgba(10,9,8,.9);overflow-y:auto;-webkit-overflow-scrolling:touch;box-sizing:border-box;
+    padding:calc(16px + env(safe-area-inset-top,0px)) calc(20px + env(safe-area-inset-right,0px)) calc(16px + env(safe-area-inset-bottom,0px)) calc(20px + env(safe-area-inset-left,0px))}
+  #about.show{display:flex}
+  #about .card{position:relative;max-width:460px;margin:auto;padding:28px 26px 22px 26px;border:1px solid var(--gold);background:#161412;text-align:center;box-sizing:border-box;width:100%}
+  #about h2{margin:0 0 12px 0;font-weight:400;letter-spacing:.08em;color:var(--gold);font-size:22px}
+  #about p{margin:10px 0;line-height:1.55;color:#d8cfbf;font-size:15px}
+  #about p.q{font-style:italic;color:#e9dfcb}
+  #about h3{margin:18px 0 4px 0;font-weight:400;font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--gold)}
+  #about p.src{font-size:13px;color:#a99f8e;margin:4px 0 0 0}
+  #about p.cr{margin:18px 0 0 0;padding:12px 0 0 0;border-top:1px solid #3a3226;font-size:13px;color:#a99f8e}
+  #about a{color:var(--gold)}
+  #aboutx{position:absolute;right:8px;top:8px;margin:0;padding:6px 10px 6px 10px;min-height:0;background:transparent;color:var(--fg);border:0;font-size:18px;line-height:1;letter-spacing:0}
+
+  /* ---- AR Preview ---- */
+  .arbtn{display:block;margin:0 auto 8px auto;min-height:48px;padding:10px 20px;font-size:14px;background:var(--gold);color:#1b1610;border-color:var(--gold)}
+  .arbtn:disabled{opacity:.45}
+  #arov{display:none;position:fixed;left:0;top:0;width:100%;height:100%;height:100dvh;z-index:30;background:#0e0d0c;color:var(--fg);font-family:Georgia,'Times New Roman',serif;touch-action:none}
+  #arov.live{background:transparent}
+  #arov video,#arov canvas{position:absolute;left:0;top:0;width:100%;height:100%;display:none}
+  #arov.m-fb video{display:block;object-fit:cover} #arov.m-fb canvas{display:block}
+  #artop{position:absolute;left:0;right:0;top:0;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:calc(12px + env(safe-area-inset-top,0px)) calc(14px + env(safe-area-inset-right,0px)) 0 calc(14px + env(safe-area-inset-left,0px));pointer-events:none}
+  #arttl{pointer-events:none;font-size:13px;line-height:1.35;padding:7px 12px;background:rgba(14,13,12,.72);border:1px solid #5c4d30;max-width:calc(100vw - 130px)}
+  #arttl:empty{visibility:hidden}
+  .arb{margin:0;min-width:52px;min-height:48px;padding:10px 16px;font-size:15px;pointer-events:auto;background:rgba(14,13,12,.78);color:var(--fg);border:1px solid var(--gold)}
+  #arexit{background:var(--gold);color:#1b1610}
+  #arhint{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(96px + env(safe-area-inset-bottom,0px));width:max-content;max-width:calc(100vw - 32px);text-align:center;font-size:13px;line-height:1.35;padding:6px 12px;background:rgba(14,13,12,.78);border:1px solid #5c4d30;pointer-events:none;transition:opacity .5s}
+  #arov.hh #arhint{opacity:0}
+  #arhint:empty{display:none}
+  #arov.s-placed #arhint{bottom:calc(132px + env(safe-area-inset-bottom,0px))}
+  #arov.m-fb.s-placed #arhint{bottom:calc(186px + env(safe-area-inset-bottom,0px))}
+  #arbot .arb{padding:9px 12px;font-size:14px;min-width:0;min-height:44px}
+  #arbot{position:absolute;left:0;right:0;bottom:calc(18px + env(safe-area-inset-bottom,0px));display:flex;justify-content:center;align-items:center;gap:10px;flex-wrap:wrap;pointer-events:none}
+  #ardrow{align-items:center;justify-content:center;flex-basis:100%;gap:8px;padding:0}
+  #ardist{min-width:58px;text-align:center;font-size:14px;text-shadow:0 1px 3px #000}
+  #arov .c{display:none}
+  #arov.s-base #arset,#arov.s-placed #armove,#arov.s-placed #arclean,#arov.s-placed #aradd,#arov.s-placed #arrem{display:block}
+  #arov.multi.s-placed #arclr{display:block}
+  #arov.canc.s-aim #arcancel,#arov.canc.s-base #arcancel{display:block}
+  #arpick{display:none;position:absolute;left:0;top:0;width:100%;height:100%;z-index:6;background:rgba(14,13,12,.97);box-sizing:border-box;flex-direction:column;touch-action:pan-y;padding:calc(12px + env(safe-area-inset-top,0px)) calc(14px + env(safe-area-inset-right,0px)) calc(12px + env(safe-area-inset-bottom,0px)) calc(14px + env(safe-area-inset-left,0px))}
+  #arpick .pt{display:flex;justify-content:space-between;align-items:center;gap:10px;padding-bottom:10px}
+  #arpick .pt b{font-weight:400;color:var(--gold);font-size:17px}
+  #arpm{margin:0 0 8px 0;width:100%;min-height:48px;background:var(--gold);color:#1b1610}
+  #arpr{width:100%;font:inherit;font-size:15px;padding:10px 12px;margin:0 0 8px 0;background:#1d1a16;color:var(--fg);border:1px solid #5c4d30}
+  #arpz{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px 0}
+  #arpz button{margin:0;padding:7px 10px;min-height:0;font-size:13px;letter-spacing:0;background:transparent;color:var(--fg);border:1px solid #5c4d30}
+  #arpz button.on{background:var(--gold);color:#1b1610;border-color:var(--gold)}
+  #arpl .rh{grid-column:1/-1;color:var(--gold);font-size:14px;padding:8px 0 0 0;border-bottom:1px solid #3a3226}
+  #arpl{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;touch-action:pan-y;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;align-content:start;grid-auto-rows:max-content;padding-bottom:8px}
+  #arpl button{display:flex;flex-direction:column;align-items:stretch;gap:5px;width:100%;text-align:left;margin:0;padding:0;border:0;background:transparent;color:var(--fg);letter-spacing:0;font-size:12px;line-height:1.25;min-height:0}
+  #arpl button span{display:block;overflow:hidden;max-height:3.9em;word-break:break-word}
+  #arpl button small{display:block;color:#a99f8e;font-size:11px;overflow:hidden;max-height:2.5em}
+  #arpl .th{display:block;width:100%;height:auto;aspect-ratio:1/1;flex:none;object-fit:contain;background:#2a241c;border:1px solid #5c4d30}
+  #arpl .none{grid-column:1/-1;padding:20px 6px;color:#a99f8e}
+  #arov.m-fb.s-placed #ardrow{display:flex}
+  #arx{display:none;position:absolute;left:50%;top:50%;width:30px;height:30px;margin:-15px 0 0 -15px;border:2px solid var(--gold);border-radius:50%;pointer-events:none;box-shadow:0 0 0 1px rgba(0,0,0,.4)}
+  #arov.m-fb.s-base #arx{display:block}
+  #arov.clean #artop,#arov.clean #arhint,#arov.clean #arbot{display:none}
+  #arcam{display:none;position:absolute;left:0;right:0;bottom:calc(28px + env(safe-area-inset-bottom,0px));justify-content:center;align-items:center;gap:26px;pointer-events:none}
+  #arov.clean.m-fb #arcam{display:flex}
+  #arshutter{margin:0;width:74px;height:74px;padding:0;border-radius:50%;background:rgba(255,255,255,.92);border:5px solid rgba(255,255,255,.45);background-clip:padding-box;pointer-events:auto}
+  #artimer{margin:0;padding:10px 14px;min-height:48px;font-size:13px;background:rgba(14,13,12,.55);color:var(--fg);border:1px solid rgba(255,255,255,.35);pointer-events:auto}
+  #arcount{display:none;position:absolute;left:50%;top:42%;transform:translate(-50%,-50%);font-size:96px;color:#fff;text-shadow:0 2px 12px rgba(0,0,0,.6);pointer-events:none}
+  #arflash{position:absolute;left:0;top:0;width:100%;height:100%;background:#fff;opacity:0;transition:opacity .25s;pointer-events:none}
+  #arshot{display:none;position:absolute;left:0;top:0;width:100%;height:100%;z-index:5;background:rgba(14,13,12,.96);flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:calc(16px + env(safe-area-inset-top,0px)) 16px calc(16px + env(safe-area-inset-bottom,0px)) 16px;box-sizing:border-box}
+  #arshot img{max-width:100%;max-height:calc(100% - 90px);object-fit:contain;border:1px solid #5c4d30}
+  #arshot div{display:flex;gap:12px}
+  .artoast{display:none;position:fixed;left:50%;transform:translateX(-50%);bottom:calc(120px + env(safe-area-inset-bottom,0px));z-index:40;max-width:calc(100vw - 32px);padding:12px 18px;text-align:center;font-size:14px;background:#161412;color:var(--fg);border:1px solid var(--gold);box-shadow:0 2px 14px rgba(0,0,0,.4)}
+  #roomsel,#troom{display:none!important}
+</style>
+</head>
+<body>
+<div id="intro"><div class="card">
+  <h1>FacePro</h1>
+  <p data-i="rooms">Five centuries of faces from the world’s great masterpieces.</p>
+  <p class="how" data-i="how"><b>Tap</b> to walk · <b>drag</b> to look · tap a painting to go to it.</p>
+  <p class="how" data-i="arin">🖼 <b>AR on mobile</b> · open a painting and tap “Hang on my wall” to preview it on your wall.</p>
+  <p class="how" data-i="voice">🔊 Tap ENTER to switch on the voice.</p>
+  <p class="how kb" data-i="kb">Keyboard: W A S D · T tour · R read aloud · Space pause · N / P next / prev</p>
+  <div class="langhost"></div>
+  <button id="enter" data-i="enter">ENTER GALLERY</button><br>
+  <button id="install" class="inst" type="button" data-i="install">Install app</button>
+  <p id="iosHint" data-i="ios">On iPhone and iPad: tap Share, then “Add to Home Screen”.</p>
+</div></div>
+<div id="menu"><div class="wrap">
+  <div id="rooms"><span class="brand"><a class="bn" href="https://easylandx.github.io/facepro" title="FacePro – restart">FacePro</a><a class="bl" href="https://easylandx.github.io" target="_blank" rel="noopener" title="EasyLandX" aria-label="EasyLandX"><svg viewBox="0 0 400 400" aria-hidden="true"><rect width="400" height="400" rx="80" fill="#0a58c8"/><circle cx="235" cy="170" r="116" fill="#ffd500"/><polygon points="162,236 190,320 197,286" fill="#2fbf4f"/><polygon points="318,88 172,226 190,322" fill="#e8291f"/><polygon points="318,88 75,196 168,230" fill="#fff"/><circle cx="93" cy="313" r="8" fill="#fff"/><circle cx="128" cy="292" r="6.5" fill="#fff"/><circle cx="157" cy="277" r="5" fill="#fff"/></svg></a></span></div>
+  <div id="status">Loading…</div>
+</div></div>
+<div id="tourbar"><span class="brand"><a class="bn" href="https://easylandx.github.io/facepro" title="FacePro – restart">FacePro</a><a class="bl" href="https://easylandx.github.io" target="_blank" rel="noopener" title="EasyLandX" aria-label="EasyLandX"><svg viewBox="0 0 400 400" aria-hidden="true"><rect width="400" height="400" rx="80" fill="#0a58c8"/><circle cx="235" cy="170" r="116" fill="#ffd500"/><polygon points="162,236 190,320 197,286" fill="#2fbf4f"/><polygon points="318,88 172,226 190,322" fill="#e8291f"/><polygon points="318,88 75,196 168,230" fill="#fff"/><circle cx="93" cy="313" r="8" fill="#fff"/><circle cx="128" cy="292" r="6.5" fill="#fff"/><circle cx="157" cy="277" r="5" fill="#fff"/></svg></a></span><span class="langhost"></span><span id="tinfo"></span><button id="tprev" class="room" data-i="prev" title="Previous painting (P)">◀︎ Prev</button><button id="tnext" class="room" data-i="next" title="Next painting (N)">Next ▶︎</button><button id="tslow" class="room" data-i="slower" title="Slower (−)">◀︎◀︎ Slower</button><span id="tspeed">1×</span><button id="tfast" class="room" data-i="faster" title="Faster (+)">Faster ▶︎▶︎</button><button id="twa" class="room wa" title="Send this painting on WhatsApp"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg><span>WhatsApp</span></button><button id="tcard" class="room" title="Painting info card (I)">ℹ︎ Info</button><select id="troom" title="Jump to a room and continue the tour there"></select><button id="tread" class="room" title="Read titles aloud (R)">🔊 Read aloud: On</button><button id="tpause" class="room" title="Pause / resume (Space)">⏸︎ Pause</button><button id="tstop" class="room" data-i="stop" title="Stop (T)">■ Stop</button></div>
+<div id="about" role="dialog" aria-modal="true" aria-labelledby="abouth"><div class="card">
+  <button id="aboutx" type="button" aria-label="Close">✕</button>
+  <h2 id="abouth" data-i="abtT">About FacePro</h2>
+  <p data-i="abtP1"></p>
+  <h3 data-i="abtSH">Sources</h3>
+  <p class="src" data-i="abtS"></p>
+  <p class="cr" data-i="abtC"></p>
+</div></div>
+<div id="srch"><div class="box"><div class="top"><input id="sq" type="search" placeholder="Search artist… (type the first letters)" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"><button id="sx" class="room" aria-label="Close">✕</button></div><button id="srnd" class="room" type="button" data-i="rnd">🎲 Random painting</button><div id="sl"></div></div></div>
+<div id="icn" role="dialog" aria-modal="true" aria-labelledby="icnh"><div class="box"><div class="top"><div id="icnh" data-i="icnT">Icons</div><button id="icx" class="room" type="button" aria-label="Close">✕</button></div><div class="note" data-i="icnN"></div><button id="icgo" class="room" type="button" data-i="icnGo">▶︎ Walk tour</button><div id="icl"></div></div></div>
+<div id="mus" role="dialog" aria-modal="true" aria-labelledby="mush"><div class="box"><div class="top"><button id="musb" class="room" type="button" aria-label="Back">◀︎</button><div id="mush" data-i="musT">Museums</div><button id="musx" class="room" type="button" aria-label="Close">✕</button></div><div class="note" id="musn"></div><button id="musgo" class="room" type="button" style="display:none"></button><div id="musl"></div></div></div>
+<div id="cross"></div>
+<div id="hud"><div id="cap"></div></div>
+<div id="pad"><div class="wrap"><button id="fw">▲</button><button id="bk">▼</button></div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  // ---------- The portrait hall: one room, chronological, Renaissance to today ----------
+  var ROOMS=[{name:'Portrait Gallery', sub:'Five centuries of faces', wall:0x6b2d3a, items:[["Portrait of a Man with a Blue Chaperon", "Jan van Eyck", "Man in a Blue Cap", ["Portrait of a Man with a Blue Chaperon", "Man in a Blue Chaperon", "Man in a Blue Cap Jan van Eyck"]], ["Portrait of a Man (Self Portrait?)", "Jan van Eyck", "Portrait of a Man", ["Man in a Red Turban", "Leal Souvenir"]], ["Portrait of a Carthusian", "Petrus Christus", "Portrait of a Carthusian", ["A Carthusian"]], ["Portrait of a Lady", "Rogier van der Weyden", "Portrait of a Lady", ["Portrait of a Lady Rogier", "Bildnis einer jungen Frau"]], ["Portrait of a Young Woman", "Petrus Christus", "Portrait of a Young Woman", ["Young Woman Petrus Christus", "Portrait of a Girl Christus"]], ["Diptych of Federico da Montefeltro and Battista Sforza", "Piero della Francesca", "Diptych of Federico da Montefeltro and Battista Sforza", ["Montefeltro Diptych", "Diptych of the Duke and Duchess of Urbino", "Federico da Montefeltro Battista Sforza", "Dittico dei Duchi di Urbino"]], ["Portrait of a Man", "Antonello da Messina", "Antonello Portrait of a Man", ["Portrait of a Man Antonello", "Ritratto d uomo"]], ["Portrait of a Man (Il Condottiere)", "Antonello da Messina", "Il Condottiere", ["Portrait of a Man Il Condottiere", "Condottiere Antonello"]], ["Ginevra de' Benci", "Leonardo da Vinci", "Ginevra de Benci", ["Ginevra de' Benci", "Ginevra Benci"]], ["Portrait of a Young Man", "Sandro Botticelli", "Portrait of a Young Man", ["Young Man Botticelli"]], ["Lady with an Ermine", "Leonardo da Vinci"], ["Portrait of a Young Man Holding a Roundel", "Sandro Botticelli", "Young Man Holding a Roundel", ["Portrait of a Young Man with a Roundel", "Man Holding a Roundel", "Young Man with a Medal"]], ["Salvator Mundi", "Leonardo da Vinci"], ["Mona Lisa", "Leonardo da Vinci"], ["Mona Lisa (Prado version)", "Workshop of Leonardo da Vinci", "Gioconda Prado", ["Mona Lisa Prado", "Gioconda copia del Prado"]], ["Self-Portrait at Twenty-Eight", "Albrecht Dürer"], ["The Cardinal", "Raphael", "Cardinal", ["Portrait of a Cardinal", "El cardenal", "Ritratto di cardinale"]], ["Portrait of Baldassare Castiglione", "Raphael", "Baldassare Castiglione", ["Baldassarre Castiglione", "Portrait of Baldassare Castiglione", "Castiglione Raphael"]], ["Portrait of a Halberdier", "Pontormo", "Halberdier", ["Portrait of a Halberdier", "Francesco Guardi Pontormo"]], ["Portrait of a Young Man with a Book", "Agnolo Bronzino", "Portrait of a Young Man with a Book", ["Young Man with a Book", "Portrait of a Young Man Bronzino"]], ["Portrait of Henry VIII", "Hans Holbein the Younger", "Portrait of Henry VIII", ["Henry VIII"]], ["The Nobleman with his Hand on his Chest", "El Greco", "Nobleman with his Hand on his Chest", ["Caballero de la mano en el pecho"]], ["The Laughing Cavalier", "Frans Hals"], ["The Merry Drinker", "Frans Hals", "Merry Drinker", ["De vrolijke drinker", "The Merry Drinker Hals", "Merry Drinker Hals"]], ["Portrait of a Man, Possibly a Self-Portrait", "Diego Velázquez", "Portrait of a Man Possibly a Self-Portrait", ["Possibly a Self-Portrait", "Self-Portrait"]], ["Self-Portrait at the Age of 34", "Rembrandt van Rijn", "Self-Portrait at the Age of 34", ["Self-Portrait 1640", "Self Portrait at the Age of 34"]], ["Portrait of Juan de Pareja", "Diego Velázquez", "Juan de Pareja"], ["María Teresa, Infanta of Spain", "Diego Velázquez", "Maria Teresa Infanta of Spain", ["Infanta Maria Teresa", "Maria Teresa"]], ["Self-Portrait with Beret and Turned-Up Collar", "Rembrandt van Rijn", "Self-Portrait with Beret and Turned-Up Collar", ["Self-Portrait 1659", "Self-Portrait with Beret"]], ["Self-Portrait as the Apostle Paul", "Rembrandt van Rijn", "Self-Portrait as the Apostle Paul", ["Self-Portrait as Paul", "Selfportrait as the Apostle Paul"]], ["Girl with a Pearl Earring", "Johannes Vermeer"], ["Portrait of a Lady in Blue", "Thomas Gainsborough", "Portrait of a Lady in Blue", ["Lady in Blue", "Portrait of a Lady in Blue Gainsborough", "Lady in Blue Gainsborough"]], ["Self-Portrait (ca. 1796)", "Francisco Goya", "Self-Portrait", ["Autorretrato"]], ["Self-Portrait (1815)", "Francisco Goya", "Autorretrato Goya 1815", ["Self-Portrait 1815", "Autorretrato 1815", "Self Portrait Goya 1815"]], ["The Desperate Man", "Gustave Courbet", "Desperate Man", ["Le Desespere"]], ["Portrait of Berthe Morisot with a Bouquet of Violets", "Édouard Manet", "Berthe Morisot With a Bouquet of Violets", ["Berthe Morisot with a Bouquet of Violets", "Berthe Morisot Manet"]], ["Woman Holding a Fan", "Pierre-Auguste Renoir", "Woman Holding a Fan", ["Woman with a Fan", "La femme a l eventail", "Woman with Fan"]], ["Self-Portrait, 1887", "Vincent van Gogh", "Self-Portrait 1887", ["Self-Portrait"]], ["Self-Portrait (1919)", "Amedeo Modigliani", "Modigliani Self-Portrait 1919", ["Self-Portrait 1919", "Autoritratto Modigliani", "Amedeo Modigliani 053"]], ["American Gothic", "Grant Wood"], ["The Two Fridas", "Frida Kahlo"], ["Marilyn Diptych", "Andy Warhol"]], reserve:[]}];
+  // ---------- Language (EN / ES) ----------
+  var LANG='en'; try{ LANG=localStorage.getItem('facepro-lang')==='es'?'es':'en'; }catch(e){}
+  var STR={
+    en:{rooms:'Five centuries of faces from the world’s great masterpieces.', how:'<b>Tap</b> to walk · <b>drag</b> to look · tap a painting to go to it.', rnd:'🎲 Random painting', abtBtn:'About FacePro', abtT:'About FacePro', abtP1:'Walk one hall of 42 famous portraits, from the Renaissance to today, take the guided tour, listen to each work, search by artist and, on mobile, hang a portrait on your wall.', abtSH:'Sources', abtS:'Images and details come from open collections: Wikimedia Commons, The Metropolitan Museum of Art, the Art Institute of Chicago and the Internet Archive, with texts from Wikipedia and Wikidata.', abtC:'Made by EasyLandX · <a href="https://easylandx.github.io" target="_blank" rel="noopener">easylandx.github.io</a>', arin:'🖼 <b>AR on mobile</b> · open a painting and tap “Hang on my wall” to preview it on your wall.', voice:'🔊 Tap ENTER to switch on the voice.', kb:'Keyboard: W A S D · T tour · R read aloud · Space pause · N / P next / prev', enter:'ENTER GALLERY', install:'⤓ Install app', ios:'On iPhone and iPad: tap <b>Share</b> → <b>Add to Home Screen</b> to install FacePro.',
+      tourGo:'▶︎ Walk tour (T)', tourStop:'■ Stop tour (T)', artists:'🔍 Artists', icons:'★ Icons', museums:'🏛 Museums', musT:'Museums', musN:'Top museums & collections · tap one to see its masterpieces', musGo:'▶︎ Walk tour of this museum', icnT:'Icons', icnGo:'▶︎ Walk tour of the icons', icnWord:'Icons tour', icnTip:'Top Auction Records', icnN:'Top Auction Records · record-breaking masterpieces · tap one to stand in front of it', prev:'◀︎ Prev', next:'Next ▶︎', slower:'◀︎◀︎ Slower', faster:'Faster ▶︎▶︎', read:'🔊 Read aloud: ', on:'On', off:'Off', pause:'⏸︎ Pause', resume:'▶︎ Resume', stop:'■ Stop',
+      place:'Search artist… (type the first letters)', none:'No artist found', work:' work', works:' works', paintings:' paintings', loading:' · loading from open-access archives (', link:' · click or E opens a painting’s link', tourWord:'Walk tour', paused:' · paused',
+      finished:'Tour finished · use the room menu to revisit a room', press:'Press E or click the title plate to open', searching:'searching open archives…', source:'Source: ', by:'by', choose:'Choose a room', listen:'🔊 Tap to hear this painting', listenFail:'🔇 No sound? Turn off silent mode, raise the volume, tap to retry', waMsg:'Look at this artwork in FacePro:', speech:'en-US'},
+    es:{rooms:'Cinco siglos de rostros de las grandes obras maestras.', how:'<b>Toca</b> para caminar · <b>desliza</b> para mirar · toca un cuadro para ir hasta él.', rnd:'🎲 Cuadro aleatorio', abtBtn:'Acerca de FacePro', abtT:'Acerca de FacePro', abtP1:'Recorre una sala con 42 retratos famosos, del Renacimiento a hoy, sigue el recorrido guiado, escucha cada obra, busca por artista y, en el móvil, cuelga un retrato en tu pared.', abtSH:'Fuentes', abtS:'Las imágenes y los datos proceden de colecciones abiertas: Wikimedia Commons, The Metropolitan Museum of Art, el Art Institute of Chicago y el Internet Archive, con textos de Wikipedia y Wikidata.', abtC:'Creado por EasyLandX · <a href="https://easylandx.github.io" target="_blank" rel="noopener">easylandx.github.io</a>', arin:'🖼 <b>RA en móvil</b> · abre un cuadro y toca “Colgar en mi pared” para verlo en tu pared.', voice:'🔊 Toca ENTRAR para activar la voz.', kb:'Teclado: W A S D · T recorrido · R voz alta · Espacio pausa · N / P siguiente / anterior', enter:'ENTRAR A LA GALERÍA', install:'⤓ Instalar app', ios:'En iPhone y iPad: pulsa <b>Compartir</b> → <b>Añadir a pantalla de inicio</b> para instalar FacePro.',
+      tourGo:'▶︎ Recorrido (T)', tourStop:'■ Detener recorrido (T)', artists:'🔍 Artistas', icons:'★ Íconos', museums:'🏛 Museos', musT:'Museos', musN:'Principales museos y colecciones · toca uno para ver sus obras maestras', musGo:'▶︎ Recorrido por este museo', icnT:'Íconos', icnGo:'▶︎ Recorrido por los íconos', icnWord:'Recorrido de íconos', icnTip:'Récords de subasta', icnN:'Récords de subasta · obras maestras de récord · toca una para ir hasta ella', prev:'◀︎ Anterior', next:'Siguiente ▶︎', slower:'◀︎◀︎ Más lento', faster:'Más rápido ▶︎▶︎', read:'🔊 Voz alta: ', on:'Sí', off:'No', pause:'⏸︎ Pausa', resume:'▶︎ Reanudar', stop:'■ Detener',
+      place:'Buscar artista… (escribe las primeras letras)', none:'No se encontró ningún artista', work:' obra', works:' obras', paintings:' cuadros', loading:' · cargando desde archivos abiertos (', link:' · clic o E abre el enlace del cuadro', tourWord:'Recorrido', paused:' · en pausa',
+      finished:'Recorrido terminado · usa el menú de salas para volver a una sala', press:'Pulsa E o toca la placa para abrir', searching:'buscando en archivos abiertos…', source:'Fuente: ', by:'de', choose:'Elegir sala', listen:'🔊 Toca para escuchar esta obra', listenFail:'🔇 ¿Sin sonido? Quita el modo silencio, sube el volumen y toca para reintentar', waMsg:'Mira esta obra en FacePro:', speech:'es-ES'}
+  };
+  ['en','es'].forEach(function(l){ ['rooms','abtP1','kb'].forEach(function(k){ STR[l][k]=STR[l][k].replace(/21/g,ROOMS.length); }); });   // room count follows the real number of rooms
+  function tx(k){ return STR[LANG][k]; }
+  var ES_ROOMS={'Renaissance':['Renacimiento','Renacimiento temprano y pleno'],'Baroque & Rococo':['Barroco y Rococó','Siglos XVII–XVIII'],'Modern & 20th Century':['Moderno y siglo XX','1890–1960'],
+    'Impressionism & Post-Impressionism':['Impresionismo y Posimpresionismo','Finales del siglo XIX'],'Neoclassical, Romantic & Realist':['Neoclásico, Romántico y Realista','Finales del XVIII–XIX'],'Early Modernism & Avant-Garde':['Modernismo temprano y vanguardias','1907–1920'],
+    'Post-Impressionism & Fauvism':['Posimpresionismo y Fauvismo','1880–1900'],'Expressionism':['Expresionismo','Principios del siglo XX, Alemania y Austria'],'Spanish Art Wing':['Ala de Arte Español','Del gótico a Sorolla'],'Ukiyo-e':['Ukiyo-e','Grabados japoneses en madera'],
+    'Chinese Ink Painting (Shan Shui)':['Pintura china a tinta (Shan Shui)','Paisajes de las dinastías Song, Yuan y Ming'],'Persian & Mughal Miniatures':['Miniaturas persas y mogolas','Cortes iluminadas de Irán y la India'],'Romanticism (European)':['Romanticismo europeo','Principios del siglo XIX'],
+    'Neoclassicism & Academic Art':['Neoclasicismo y arte académico','Finales del XVIII–XIX'],'Rococo':['Rococó','Siglo XVIII, Francia e Inglaterra'],'Pointillism & Neo-Impressionism':['Puntillismo y Neoimpresionismo','Seurat, Signac y Cross'],
+    'Art Nouveau & Symbolism':['Art Nouveau y Simbolismo','Fin de siglo'],'Barbizon School & French Realism':['Escuela de Barbizon y realismo francés','Mediados del siglo XIX, Francia'],'Pre-Raphaelite Brotherhood':['Hermandad Prerrafaelita','Inglaterra victoriana'],
+    'Russian Realism & Symbolism':['Realismo y simbolismo rusos','Los Itinerantes y más allá'],'Hudson River School':['Escuela del río Hudson','Paisaje estadounidense']};
+  Object.assign(ES_ROOMS,{'Portrait Gallery':['Galería de Retratos','Cinco siglos de rostros'],'Italian Renaissance Masters':['Maestros del Renacimiento italiano','Florencia, Roma y Venecia'],'Dutch Golden Age':['Siglo de Oro neerlandés','Rembrandt, Vermeer y Hals'],'Prints, Drawings & Scrolls':['Grabados, dibujos y rollos','Obras sobre papel y seda'],'Classical Sculpture & Antiquities':['Escultura clásica y antigüedades','Mármol, bronce y piedra']});
+  function rname(R){ return LANG==='es' && ES_ROOMS[R.name] ? ES_ROOMS[R.name][0] : R.name; }
+  function rsub(R){ return LANG==='es' && ES_ROOMS[R.name] ? ES_ROOMS[R.name][1] : R.sub; }
+  var signMesh=null;
+  var ANON={'Mona Lisa (Prado version)':1,'Winged Victory of Samothrace':1,'The Great Sphinx of Tanis':1,'Laocoön and His Sons':1,'Venus de Milo':1,'Apollo Belvedere':1,'Belvedere Torso':1,'The Rosetta Stone':1,'Lewis Chessmen':1,'Sutton Hoo Helmet':1,'Portland Vase':1,'Standard of Ur':1,'Lion Hunt of Ashurbanipal':1,"Hoa Hakananai'a (Moai)":1,'Book of the Dead of Hunefer':1,'Book of the Dead of Ani':1,'Nebamun Hunting in the Marshes':1,'The Wilton Diptych':1,'Admonitions of the Instructress to the Court Ladies':1};
+  function mk(R,e){ return {t:e[0]+' — '+e[1], title:e[0], artist:e[1], qt:e[2]||e[0].replace(/\s*\(.*\)/,''), alts:e[3]||[], anon:!!ANON[e[0]], emb:false, room:R}; }
+  ROOMS.forEach(function(R){
+    R.list = (R.emb||[]).map(function(e,i){ return {t:e[0], kind:e[1], link:e[2], emb:true, seed:i+3}; })
+      .concat((R.items||[]).map(function(e){ return mk(R,e); }));
+    R.reserve = (R.reserve||[]).map(function(e){ return mk(R,e); });
+  });
+
+  // ---------- Renderer / scene ----------
+  var renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  renderer.setSize(innerWidth, innerHeight);
+  document.body.appendChild(renderer.domElement);
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0e0d0c);
+  scene.fog = new THREE.Fog(0x0e0d0c, 18, 48);
+  var camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, .1, 100);
+  camera.rotation.order = 'YXZ';
+
+  function woodTex(){
+    var c=document.createElement('canvas'); c.width=c.height=512; var x=c.getContext('2d');
+    for (var i=0;i<8;i++){ x.fillStyle=['#6b4a2e','#7a5535','#5f4129','#74502f'][i%4]; x.fillRect(0,i*64,512,64);
+      x.fillStyle='rgba(0,0,0,.25)'; x.fillRect(0,i*64,512,2);
+      for (var k=0;k<30;k++){ x.fillStyle='rgba(0,0,0,.06)'; x.fillRect(Math.random()*512,i*64+Math.random()*64,Math.random()*120,1);} }
+    var t=new THREE.CanvasTexture(c); t.wrapS=t.wrapT=THREE.RepeatWrapping; return t;
+  }
+  var wood = woodTex();
+  var frameMat = new THREE.MeshStandardMaterial({color:0x8b6a2b, metalness:.5, roughness:.4});
+  var matMat = new THREE.MeshBasicMaterial({color:0xf2ede2});
+  var skirt = new THREE.MeshStandardMaterial({color:0x3b2f25});
+  var benchMat = new THREE.MeshStandardMaterial({color:0x2a2420,roughness:.7});
+
+  // ---------- Procedural paintings ----------
+  function rnd(seed){ var s=seed*97+13; return function(){ s=(s*16807)%2147483647; return (s-1)/2147483646; }; }
+  function paint(kind, seed){
+    var W=512, c=document.createElement('canvas'); c.width=c.height=W; var x=c.getContext('2d'), r=rnd(seed), g;
+    function rc(a){ return 'hsl('+Math.floor(r()*360)+','+(50+r()*40)+'%,'+(a||55)+'%)'; }
+    if (kind==='waves'){
+      g=x.createLinearGradient(0,0,0,W); g.addColorStop(0,'#2b1a4d'); g.addColorStop(.45,'#e0603a'); g.addColorStop(.55,'#f5c26b'); g.addColorStop(1,'#16304f');
+      x.fillStyle=g; x.fillRect(0,0,W,W); x.fillStyle='#fde9a8'; x.beginPath(); x.arc(256,230,50,0,7); x.fill();
+      for (var i=0;i<14;i++){ x.strokeStyle='hsla('+(200+i*5)+',60%,'+(20+i*2)+'%,.9)'; x.lineWidth=14; x.beginPath();
+        for (var px=0;px<=W;px+=8){ var py=280+i*18+Math.sin(px/40+i)*10; px?x.lineTo(px,py):x.moveTo(px,py);} x.stroke(); }
+    } else if (kind==='grid'){
+      x.fillStyle='#f3eee2'; x.fillRect(0,0,W,W); var cols=['#d12a22','#1f4fa8','#f2c316','#f3eee2','#f3eee2'];
+      for (var a=0;a<4;a++) for (var b=0;b<4;b++){ if (r()>.45){ x.fillStyle=cols[Math.floor(r()*5)]; x.fillRect(a*128+6,b*128+6,116,116);} }
+      x.fillStyle='#111'; for (var k=0;k<=4;k++){ x.fillRect(k*128-4,0,8,W); x.fillRect(0,k*128-4,W,8); }
+    } else if (kind==='moons'){
+      g=x.createRadialGradient(256,256,10,256,256,360); g.addColorStop(0,'#1c2a4a'); g.addColorStop(1,'#07080f'); x.fillStyle=g; x.fillRect(0,0,W,W);
+      for (var m=0;m<7;m++){ var cx=60+r()*390, cy=60+r()*390, rad=30+r()*80;
+        for (var q=5;q>0;q--){ x.fillStyle=rc(30+q*8); x.globalAlpha=.85; x.beginPath(); x.arc(cx,cy,rad*q/5,0,7); x.fill(); } }
+      x.globalAlpha=1;
+    } else if (kind==='hills'){
+      g=x.createLinearGradient(0,0,0,W); g.addColorStop(0,'#0b1030'); g.addColorStop(1,'#5b4a8a'); x.fillStyle=g; x.fillRect(0,0,W,W);
+      for (var s=0;s<90;s++){ x.fillStyle='rgba(255,255,230,'+r()*.9+')'; x.fillRect(r()*W,r()*220,2,2); }
+      for (var h=0;h<5;h++){ x.fillStyle='hsl('+(250-h*8)+',35%,'+(28-h*4)+'%)'; x.beginPath(); x.moveTo(0,W);
+        for (var p2=0;p2<=W;p2+=16) x.lineTo(p2,230+h*55+Math.sin(p2/70+h*2)*40+r()*10); x.lineTo(W,W); x.fill(); }
+    } else if (kind==='fields'){
+      var cl=[rc(40),rc(55),rc(35)]; x.fillStyle=rc(25); x.fillRect(0,0,W,W);
+      for (var f=0;f<3;f++){ x.fillStyle=cl[f]; x.globalAlpha=.9; x.fillRect(50,40+f*155,412,140); }
+      x.globalAlpha=1; x.fillStyle='rgba(0,0,0,.12)'; for (var n=0;n<600;n++) x.fillRect(r()*W,r()*W,2,2);
+    } else {
+      x.fillStyle=rc(15); x.fillRect(0,0,W,W);
+      for (var t=0;t<90;t++){ x.strokeStyle=rc(40+r()*35); x.lineWidth=3+r()*14; x.lineCap='round'; x.beginPath();
+        var sx=r()*W, sy=r()*W; x.moveTo(sx,sy); x.bezierCurveTo(sx+r()*200-100,sy+r()*200-100,sx+r()*200-100,sy+r()*200-100,sx+r()*260-130,sy+r()*260-130); x.stroke(); }
+    }
+    return c;
+  }
+
+  // ---------- Per-painting textures (created once, reused across room visits) ----------
+  function wrapText(x,text,cx,y,maxW,lh,maxLines){
+    var words=text.split(' '), line='', lines=[];
+    words.forEach(function(w){ var t=line?line+' '+w:w; if (x.measureText(t).width>maxW && line){ lines.push(line); line=w; } else line=t; });
+    lines.push(line); lines.slice(0,maxLines).forEach(function(l,i){ x.fillText(l,cx,y+i*lh); });
+  }
+  function drawLabel(it){
+    var c=it.labelCanvas, x=c.getContext('2d'), W=c.width, H=c.height;
+    x.fillStyle='#f6f0e2'; x.fillRect(0,0,W,H); x.strokeStyle='#c9a45c'; x.lineWidth=4; x.strokeRect(6,6,W-12,H-12);
+    x.fillStyle='#1b1610'; x.textAlign='center'; x.font='bold 40px Georgia'; wrapText(x,it.t,W/2,58,W-70,44,2);
+    x.fillStyle='#8a5a12'; x.font='26px Georgia';
+    var l = it.link ? it.link.replace('https://','') : tx('searching');
+    x.fillText((l.length>58 ? l.slice(0,57)+'…' : l)+(it.link?' ↗':''), W/2, H-48);
+    var src=(it.srcName?tx('source')+it.srcName:'')+(it.archTitle?(it.srcName?' · ':'')+it.archTitle:'');
+    if (src){ x.fillStyle='#6d655a'; x.font='italic 22px Georgia'; x.fillText(src.length>72?src.slice(0,71)+'…':src, W/2, H-18); }
+    it.labelTex.needsUpdate=true;
+  }
+  function drawPlaceholder(it,msg){
+    var x=it.phCanvas.getContext('2d'); x.fillStyle='#d9d1c0'; x.fillRect(0,0,256,256);
+    x.fillStyle='#8a8070'; x.font='18px Georgia'; x.textAlign='center'; x.fillText(msg,128,132); it.phTex.needsUpdate=true;
+  }
+  function prep(it){
+    if (it.ready) return; it.ready=true;
+    it.labelCanvas=document.createElement('canvas'); it.labelCanvas.width=1024; it.labelCanvas.height=240;
+    it.labelTex=new THREE.CanvasTexture(it.labelCanvas);
+    if (it.emb){ it.tex=new THREE.CanvasTexture(paint(it.kind,it.seed)); it.aspect=1; it.state='done'; }
+    else { it.phCanvas=document.createElement('canvas'); it.phCanvas.width=it.phCanvas.height=256; it.phTex=new THREE.CanvasTexture(it.phCanvas); drawPlaceholder(it,'loading…'); }
+    drawLabel(it);
+  }
+  function fitMesh(it){ if (!it.mesh||!it.aspect) return; var s=3,a=it.aspect; it.mesh.scale.set(a>=1?s:s*a, a>=1?s/a:s, 1); }
+
+  // ---------- Image sources (open access first), pins, cache, queue ----------
+  // Optional: free Rijksmuseum API key. Leave empty to skip that source.
+  var RIJKS_KEY='';
+  // Optional: run copyPins() in the browser console (F12) after visiting the rooms, then paste its output here to skip every search for all visitors.
+  var PINNED = {
+    "Portrait of Baldassare Castiglione — Raphael": {"file": "Baldassare_Castiglione,_by_Raffaelo_Sanzio,_from_C2RMF_retouched.jpg"},
+    "The Cardinal — Raphael": {"file": "Portrait_of_a_Cardinal_(by_Raphael)_-_Prado_Museum.jpg"},
+    "Portrait of Juan de Pareja — Diego Velázquez": {"file": "Retrato_de_Juan_Pareja,_by_Diego_Velázquez.jpg"},
+    "Portrait of a Young Woman — Petrus Christus": {"file": "Petrus_Christus_-_Portrait_of_a_Young_Woman_-_Google_Art_Project.jpg"},
+    "Portrait of a Lady — Rogier van der Weyden": {"file": "Rogier_van_der_Weyden_-_Portrait_of_a_Lady_-_Google_Art_Project.jpg"},
+    "Portrait of a Man with a Blue Chaperon — Jan van Eyck": {"file": "Jan_van_Eyck_-_Man_in_a_Blue_Cap_(c.1430).jpg"},
+    "Portrait of a Young Man with a Book — Agnolo Bronzino": {"file": "Agnolo_Bronzino_-_Portrait_of_a_Young_Man.jpg"},
+    "Ginevra de' Benci — Leonardo da Vinci": {"file": "Leonardo_da_Vinci_-_Ginevra_de'_Benci_-_Google_Art_Project.jpg"},
+    "The Laughing Cavalier — Frans Hals": {"file": "Frans_Hals_–_The_Laughing_Cavalier.jpg"},
+    "Self-Portrait (1815) — Francisco Goya": {"file": "Autorretrato_Goya_1815.jpg"},
+    "Portrait of Berthe Morisot with a Bouquet of Violets — Édouard Manet": {"file": "Edouard_Manet_-_Berthe_Morisot_With_a_Bouquet_of_Violets_-_Google_Art_Project.jpg"},
+    "Self-Portrait (1919) — Amedeo Modigliani": {"file": "Amedeo_Modigliani_053.jpg"},
+    // exact Wikimedia Commons files, looked up by name through the Commons API the first time each picture is needed
+    "Girl with a Pearl Earring — Johannes Vermeer": {"file": "1665_Girl_with_a_Pearl_Earring.jpg"},
+    "Portrait of a Man (Self Portrait?) — Jan van Eyck": {"file": "Portrait_of_a_Man_in_a_red_turban_(by_Jan_van_Eyck).jpg"},
+    "Lady with an Ermine — Leonardo da Vinci": {"file": "The_Lady_with_an_Ermine.jpg"},
+    "Self-Portrait at Twenty-Eight — Albrecht Dürer": {"file": "Self-portrait_by_Albrecht_Dürer.jpg"},
+    "Portrait of a Man — Antonello da Messina": {"file": "Antonello_da_Messina_-_Portrait_of_a_Man_-_National_Gallery_London.jpg"},
+    "Portrait of a Young Man — Sandro Botticelli": {"file": "Sandro_Botticelli_-_Portrait_of_a_Young_Man.jpg"},
+    "Portrait of a Man (Il Condottiere) — Antonello da Messina": {"file": "Antonello_da_Messina_-_Portrait_of_a_Man_(Il_Condottiere)_-_WGA0745.jpg"},
+    "The Desperate Man — Gustave Courbet": {"file": "Gustave_Courbet_-_Le_Désespéré_(1843).jpg"},
+    "Self-Portrait with Beret and Turned-Up Collar — Rembrandt van Rijn": {"file": "Rembrandt_van_Rijn_-_Self-Portrait_-_Google_Art_Project.jpg"},
+    "The Scream — Edvard Munch": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Edvard_Munch%2C_1893%2C_The_Scream%2C_oil%2C_tempera_and_pastel_on_cardboard%2C_91_x_73_cm%2C_National_Gallery_of_Norway.jpg/960px-Edvard_Munch%2C_1893%2C_The_Scream%2C_oil%2C_tempera_and_pastel_on_cardboard%2C_91_x_73_cm%2C_National_Gallery_of_Norway.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c5/Edvard_Munch%2C_1893%2C_The_Scream%2C_oil%2C_tempera_and_pastel_on_cardboard%2C_91_x_73_cm%2C_National_Gallery_of_Norway.jpg/500px-Edvard_Munch%2C_1893%2C_The_Scream%2C_oil%2C_tempera_and_pastel_on_cardboard%2C_91_x_73_cm%2C_National_Gallery_of_Norway.jpg", "link": "https://commons.wikimedia.org/wiki/File:Edvard_Munch,_1893,_The_Scream,_oil,_tempera_and_pastel_on_cardboard,_91_x_73_cm,_National_Gallery_of_Norway.jpg", "src": "Wikimedia Commons", "title": "The Scream (1893)"},
+    "Salvator Mundi — Leonardo da Vinci": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Leonardo_da_Vinci%2C_Salvator_Mundi%2C_c.1500%2C_oil_on_walnut%2C_45.4_%C3%97_65.6_cm.jpg/960px-Leonardo_da_Vinci%2C_Salvator_Mundi%2C_c.1500%2C_oil_on_walnut%2C_45.4_%C3%97_65.6_cm.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Leonardo_da_Vinci%2C_Salvator_Mundi%2C_c.1500%2C_oil_on_walnut%2C_45.4_%C3%97_65.6_cm.jpg/500px-Leonardo_da_Vinci%2C_Salvator_Mundi%2C_c.1500%2C_oil_on_walnut%2C_45.4_%C3%97_65.6_cm.jpg", "link": "https://commons.wikimedia.org/wiki/File:Leonardo_da_Vinci,_Salvator_Mundi,_c.1500,_oil_on_walnut,_45.4_×_65.6_cm.jpg", "src": "Wikimedia Commons", "title": "Salvator Mundi"},
+    "The Card Players (Qatar version) — Paul Cézanne": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/93/Les_Joueurs_de_cartes%2C_par_Paul_C%C3%A9zanne%2C_collection_Al-Thani%2C_Yorck.jpg/960px-Les_Joueurs_de_cartes%2C_par_Paul_C%C3%A9zanne%2C_collection_Al-Thani%2C_Yorck.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/93/Les_Joueurs_de_cartes%2C_par_Paul_C%C3%A9zanne%2C_collection_Al-Thani%2C_Yorck.jpg/500px-Les_Joueurs_de_cartes%2C_par_Paul_C%C3%A9zanne%2C_collection_Al-Thani%2C_Yorck.jpg", "link": "https://commons.wikimedia.org/wiki/File:Les_Joueurs_de_cartes,_par_Paul_Cézanne,_collection_Al-Thani,_Yorck.jpg", "src": "Wikimedia Commons", "title": "The Card Players"},
+    "Nafea Faa Ipoipo (When Will You Marry?) — Paul Gauguin": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/61/Paul_Gauguin%2C_Nafea_Faa_Ipoipo%3F_1892%2C_oil_on_canvas%2C_101_x_77_cm.jpg/960px-Paul_Gauguin%2C_Nafea_Faa_Ipoipo%3F_1892%2C_oil_on_canvas%2C_101_x_77_cm.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/6/61/Paul_Gauguin%2C_Nafea_Faa_Ipoipo%3F_1892%2C_oil_on_canvas%2C_101_x_77_cm.jpg/500px-Paul_Gauguin%2C_Nafea_Faa_Ipoipo%3F_1892%2C_oil_on_canvas%2C_101_x_77_cm.jpg", "link": "https://commons.wikimedia.org/wiki/File:Paul_Gauguin,_Nafea_Faa_Ipoipo?_1892,_oil_on_canvas,_101_x_77_cm.jpg", "src": "Wikimedia Commons", "title": "Nafea Faa Ipoipo?"},
+    "Water Serpents II — Gustav Klimt": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Klimt_-_Wasserschlangen_II_%28Freundinnen%29_-_1904.jpeg/960px-Klimt_-_Wasserschlangen_II_%28Freundinnen%29_-_1904.jpeg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Klimt_-_Wasserschlangen_II_%28Freundinnen%29_-_1904.jpeg/500px-Klimt_-_Wasserschlangen_II_%28Freundinnen%29_-_1904.jpeg", "link": "https://commons.wikimedia.org/wiki/File:Klimt_-_Wasserschlangen_II_(Freundinnen)_-_1904.jpeg", "src": "Wikimedia Commons", "title": "Wasserschlangen II (Freundinnen)"},
+    "Portrait of Marten Soolmans — Rembrandt van Rijn": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/93/Rembrandt_Portrait_of_Marten_Soolmans.jpg/960px-Rembrandt_Portrait_of_Marten_Soolmans.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/9/93/Rembrandt_Portrait_of_Marten_Soolmans.jpg/500px-Rembrandt_Portrait_of_Marten_Soolmans.jpg", "link": "https://commons.wikimedia.org/wiki/File:Rembrandt_Portrait_of_Marten_Soolmans.jpg", "src": "Wikimedia Commons", "title": "Portrait of Marten Soolmans"},
+    "Nu Couché (Reclining Nude) — Amedeo Modigliani": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/Modigliani_-_Nu_couch%C3%A9.jpg/960px-Modigliani_-_Nu_couch%C3%A9.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/Modigliani_-_Nu_couch%C3%A9.jpg/500px-Modigliani_-_Nu_couch%C3%A9.jpg", "link": "https://commons.wikimedia.org/wiki/File:Modigliani_-_Nu_couché.jpg", "src": "Wikimedia Commons", "title": "Nu couché"},
+    "Portrait of Adele Bloch-Bauer II — Gustav Klimt": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/33/Gustav_Klimt_047.jpg/960px-Gustav_Klimt_047.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/33/Gustav_Klimt_047.jpg/500px-Gustav_Klimt_047.jpg", "link": "https://commons.wikimedia.org/wiki/File:Gustav_Klimt_047.jpg", "src": "Wikimedia Commons", "title": "Portrait of Adele Bloch-Bauer II"},
+    "Nature morte à la nappe à carreaux — Juan Gris": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/76/Nature_morte_%C3%A0_la_nappe_%C3%A0_carreaux_%281915%29.jpg/960px-Nature_morte_%C3%A0_la_nappe_%C3%A0_carreaux_%281915%29.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/7/76/Nature_morte_%C3%A0_la_nappe_%C3%A0_carreaux_%281915%29.jpg/500px-Nature_morte_%C3%A0_la_nappe_%C3%A0_carreaux_%281915%29.jpg", "link": "https://commons.wikimedia.org/wiki/File:Nature_morte_à_la_nappe_à_carreaux_(1915).jpg", "src": "Wikimedia Commons", "title": "Nature morte à la nappe à carreaux"},
+    "Irises — Vincent van Gogh": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Irises-Vincent_van_Gogh.jpg/960px-Irises-Vincent_van_Gogh.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/3/3e/Irises-Vincent_van_Gogh.jpg/500px-Irises-Vincent_van_Gogh.jpg", "link": "https://commons.wikimedia.org/wiki/File:Irises-Vincent_van_Gogh.jpg", "src": "Wikimedia Commons", "title": "Irises"},
+    "Self-Portrait without Beard — Vincent van Gogh": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/18/Vincent_van_Gogh_-_Self-Portrait_-_Google_Art_Project_%28719161%29.jpg/960px-Vincent_van_Gogh_-_Self-Portrait_-_Google_Art_Project_%28719161%29.jpg", "alt": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/18/Vincent_van_Gogh_-_Self-Portrait_-_Google_Art_Project_%28719161%29.jpg/500px-Vincent_van_Gogh_-_Self-Portrait_-_Google_Art_Project_%28719161%29.jpg", "link": "https://commons.wikimedia.org/wiki/File:Vincent_van_Gogh_-_Self-Portrait_-_Google_Art_Project_(719161).jpg", "src": "Wikimedia Commons", "title": "Self-Portrait"}
+  };
+  var CACHE_KEY='facepro-pins-v1', cache={};
+  try{ cache=JSON.parse(localStorage.getItem(CACHE_KEY)||'{}'); }catch(e){}
+  function saveCache(it,c){ cache[it.t]={url:c.url,alt:c.alt||'',link:c.link,src:c.src,title:c.title||'',file:c.file||''}; try{ localStorage.setItem(CACHE_KEY,JSON.stringify(cache)); }catch(e){} }
+  function dl(id,file){ return 'https://archive.org/download/'+id+'/'+encodeURIComponent(file); }
+  function enc(s){ return encodeURIComponent(s); }
+  function strip(s){ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/"/g,''); }
+  function norm(s){ return strip(s).toLowerCase().replace(/[^a-z0-9]+/g,' ').trim(); }
+  var STOP={the:1,and:1,with:1,from:1,for:1,les:1,des:1};
+  function toks(s){ return norm(s).split(' ').filter(function(w){ return w.length>2 && !STOP[w]; }); }
+  function surname(a){ a=strip(a).replace(/\s+the (Younger|Elder)$/,''); var w=a.split(' '); return /Rembrandt|Giotto/.test(a)? w[0] : w[w.length-1]; }
+  // A result must contain every significant word of the title and the artist's surname, otherwise it is rejected
+  function titleOK(it,t){ var n=' '+norm(t)+' '; return [it.qt].concat(it.alts||[]).some(function(q){ var tk=toks(q); return tk.length>0 && tk.every(function(w){ return n.indexOf(' '+w)>-1; }); }); }
+  function artistOK(it,s){ return (' '+norm(s)+' ').indexOf(' '+norm(surname(it.artist)))>-1; }
+  // fetch with timeout; resolves to parsed JSON or null (never throws)
+  function jf(url,opts){
+    var ctl=window.AbortController?new AbortController():null, t=setTimeout(function(){ if (ctl) ctl.abort(); },9000);
+    opts=opts||{}; if (ctl) opts.signal=ctl.signal;
+    return fetch(url,opts).then(function(r){ clearTimeout(t); return r.ok?r.json():null; }).catch(function(){ clearTimeout(t); return null; });
+  }
+  // Wikimedia asks browser apps to identify themselves with Api-User-Agent; retry without it if the header is blocked
+  function wjf(url){ return jf(url,{headers:{'Api-User-Agent':'WalkableGallery/1.0 (educational 3D art gallery)'}}).then(function(d){ return d||jf(url); }); }
+  var MET='https://collectionapi.metmuseum.org/public/collection/v1';
+  var BAD_FILE=/\b(detail|crop|cropped|copy|after|sketch|study|replica|frame|caricature|parody)\b/i;
+
+  var SOURCES=[
+    // Art Institute of Chicago: CC0, public-domain filter in the query, IIIF image at the recommended 843px width, CORS-friendly
+    {name:'Art Institute of Chicago', find:function(it){
+      return jf('https://api.artic.edu/api/v1/artworks/search?q='+enc(strip(it.qt)+' '+surname(it.artist))+'&query[term][is_public_domain]=true&limit=8&fields=id,title,artist_display,image_id').then(function(d){
+        var h=d&&d.data&&d.data.filter(function(a){ return a.image_id && titleOK(it,a.title) && artistOK(it,a.artist_display); })[0];
+        if (!h) return null;
+        return {url:((d.config&&d.config.iiif_url)||'https://www.artic.edu/iiif/2')+'/'+h.image_id+'/full/843,/0/default.jpg', link:'https://www.artic.edu/artworks/'+h.id, src:'Art Institute of Chicago', title:h.title};
+      }); }},
+    // The Met: CC0 objects only (isPublicDomain), medium-size image rather than the multi-MB original
+    {name:'The Met', find:function(it){
+      return jf(MET+'/search?hasImages=true&q='+enc(strip(it.qt)+' '+surname(it.artist))).then(function(d){
+        var ids=((d&&d.objectIDs)||[]).slice(0,8); if (!ids.length) return null;
+        return Promise.all(ids.map(function(id){ return jf(MET+'/objects/'+id); })).then(function(os){
+          var h=os.filter(function(o){ return o && o.isPublicDomain && o.primaryImageSmall && titleOK(it,o.title) && artistOK(it,o.artistDisplayName); })[0];
+          return h ? {url:h.primaryImageSmall, link:h.objectURL, src:'The Met', title:h.title} : null;
+        }); }); }},
+    // Wikimedia Commons: only files whose licence says public domain / CC0, 1024px thumbnail from upload.wikimedia.org
+    {name:'Wikimedia Commons', find:function(it){
+      var u='https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrnamespace=6&gsrlimit=10&gsrsearch='+enc(strip(it.qt)+' '+surname(it.artist)+' filetype:bitmap')
+        +'&prop=imageinfo&iiprop=url|mime|extmetadata&iiurlwidth=1024&iiextmetadatafilter=LicenseShortName|Copyrighted|ObjectName|Artist';
+      return wjf(u).then(function(d){
+        var pages=d&&d.query&&d.query.pages; if (!pages) return null;
+        var list=Object.keys(pages).map(function(k){return pages[k];}).sort(function(a,b){return (a.index||0)-(b.index||0);});
+        var h=list.filter(function(p){
+          var ii=p.imageinfo&&p.imageinfo[0]; if (!ii||!/^image\/(jpeg|png)$/.test(ii.mime||'')) return false;
+          var md=ii.extmetadata||{}, lic=(md.LicenseShortName&&md.LicenseShortName.value)||'', cp=md.Copyrighted&&md.Copyrighted.value;
+          var pd=/public domain|^pd|cc0/i.test(lic) || cp==='False';
+          var name=(p.title||'').replace(/^File:/,'');
+          var who=(md.Artist&&md.Artist.value)||'';
+          return pd && titleOK(it,name) && (it.anon || artistOK(it,name) || artistOK(it,who)) && (!BAD_FILE.test(name)||BAD_FILE.test(it.qt));
+        })[0];
+        if (!h) return null; var ii=h.imageinfo[0], md=ii.extmetadata||{};
+        return {url:ii.thumburl||ii.url, link:ii.descriptionurl, src:'Wikimedia Commons', title:((md.ObjectName&&md.ObjectName.value)||(h.title||'').replace(/^File:/,'')).replace(/<[^>]+>/g,'')};
+      }); }},
+    // Rijksmuseum: needs a free API key (RIJKS_KEY above), skipped otherwise
+    {name:'Rijksmuseum', ok:function(){ return !!RIJKS_KEY; }, find:function(it){
+      return jf('https://www.rijksmuseum.nl/api/en/collection?key='+enc(RIJKS_KEY)+'&imgonly=true&ps=8&q='+enc(strip(it.qt)+' '+surname(it.artist))).then(function(d){
+        var h=((d&&d.artObjects)||[]).filter(function(o){ return o.webImage && titleOK(it,o.title) && artistOK(it,o.principalOrFirstMaker); })[0];
+        return h ? {url:h.webImage.url.replace(/=s\d+$/,'=w1200'), link:(h.links&&h.links.web)||'https://www.rijksmuseum.nl/en/collection', src:'Rijksmuseum', title:h.title} : null;
+      }); }}
+  ];
+
+  function loadImg(url){ return new Promise(function(res,rej){ var done=false, t=setTimeout(function(){ if(!done){ done=true; rej(0); } },20000);
+    new THREE.TextureLoader().setCrossOrigin('anonymous').load(url,function(x){ if(!done){ done=true; clearTimeout(t); res(x); } },undefined,function(e){ if(!done){ done=true; clearTimeout(t); rej(e); } }); }); }
+  // Load the candidate as a WebGL texture. If the host blocks CORS the load fails and the next source is tried.
+  function tryCand(it,c){
+    return loadImg(c.url).catch(function(){ if (!c.alt) throw 0; c.url=c.alt; c.alt=''; return loadImg(c.url); }).then(function(t){
+      t.minFilter=THREE.LinearFilter; t.generateMipmaps=false; t.anisotropy=4;
+      it.tex=t; it.aspect=t.image.width/t.image.height; it.link=c.link; it.srcName=c.src; it.archTitle=c.title||''; drawLabel(it);
+      if (it.mesh){ it.mesh.material.map=t; it.mesh.material.needsUpdate=true; fitMesh(it); }
+      return true;
+    }).catch(function(){ return false; });
+  }
+  function pinCand(p){
+    if (!p) return null;
+    if (p.url) return {url:p.url,alt:p.alt||'',link:p.link,src:p.src||'',title:p.title||''};
+    if (p.id && p.file) return {url:dl(p.id,p.file),alt:'https://archive.org/services/img/'+p.id,link:'https://archive.org/details/'+p.id,src:'Internet Archive',title:p.title||''};
+    return null;
+  }
+  function full(it,cb){
+    var i=0;
+    (function next(){
+      if (i>=SOURCES.length){ it.failed=true; cb(); return; }
+      var s=SOURCES[i++]; if (s.ok && !s.ok()) return next();
+      Promise.resolve().then(function(){ return s.find(it); }).catch(function(){ return null; }).then(function(c){
+        if (!c) return next();
+        return tryCand(it,c).then(function(ok){ if (ok){ saveCache(it,c); cb(); } else next(); });
+      });
+    })();
+  }
+  // a pin written as {file:'Name.jpg'} is looked up on Wikimedia Commons (1024 px thumbnail, or the original if it is smaller)
+  function commonsFile(name){
+    return wjf('https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&prop=imageinfo&iiprop=url|mime&iiurlwidth=1024&titles='+enc('File:'+name.replace(/_/g,' '))).then(function(d){
+      var ps=d&&d.query&&d.query.pages, p=ps&&ps[Object.keys(ps)[0]], ii=p&&p.imageinfo&&p.imageinfo[0];
+      if (!ii||!/^image\/(jpeg|png)$/.test(ii.mime||'')) return null;
+      return {url:ii.thumburl||ii.url, alt:'', link:ii.descriptionurl, src:'Wikimedia Commons', title:(p.title||'').replace(/^File:/,'').replace(/\.\w+$/,'').replace(/_/g,' '), file:name};
+    });
+  }
+  function resolve(it,cb){
+    var pin=PINNED[it.t];
+    if (pin && pin.file && !pin.url){
+      var go=function(c){ if (!c) return full(it,cb);
+        tryCand(it,c).then(function(ok){ if (ok){ PINNED[it.t]=Object.assign({file:pin.file},c); saveCache(it,c); cb(); } else full(it,cb); }); };
+      var cc=cache[it.t], c0=cc&&cc.file===pin.file&&cc.url?pinCand(cc):null;
+      if (c0){ c0.file=pin.file; return go(c0); }
+      return commonsFile(pin.file).then(go);
+    }
+    var c=pinCand(PINNED[it.t]||cache[it.t]);
+    if (!c) return full(it,cb);
+    tryCand(it,c).then(function(ok){ if (ok) cb(); else full(it,cb); });
+  }
+  var queue=[], active=0, rlTimer=null;
+  function pump(){ while(active<6 && queue.length){ (function(it){ active++; it.state='loading';
+    resolve(it,function(){ active--; it.state='done'; if (it.failed){ promote(it); relayout(); } setStatus(); pump(); }); })(queue.shift()); } }
+  function promote(it){ var R=it.room; if (R && R.reserve && R.reserve.length) R.list.push(R.reserve.shift()); }
+  function relayout(){ clearTimeout(rlTimer); rlTimer=setTimeout(function(){ if (roomIdx<0) return; var p=camera.position, walkIt=nav&&nav.item, arrived=!!(linkItem && lp && Math.hypot(p.x-lp.x,p.z-lp.z)<0.3 && Math.abs(wrapA(yaw-lp.yaw))<0.12);
+      enterRoom(roomIdx,true);
+      // a print that failed to load was removed and the others shifted: stay on (or keep walking to) the painting that was chosen
+      if (walkIt) goArt(walkIt); else if (arrived) placeAt(linkItem); },500); }
+  function enqueue(it){ if (it.state||it.emb) return; it.state='queued'; queue.push(it); }
+
+  window.copyPins=function(){
+    var all={}; Object.keys(cache).forEach(function(k){all[k]=cache[k];}); Object.keys(PINNED).forEach(function(k){all[k]=PINNED[k];});
+    var lines=Object.keys(all).map(function(k){ var c=pinCand(all[k]); return c?"    "+JSON.stringify(k)+": "+JSON.stringify({url:c.url,alt:c.alt||'',link:c.link,src:c.src,title:c.title||''}):null; }).filter(Boolean);
+    var txt="var PINNED = {\n"+lines.join(",\n")+"\n  };";
+    console.log(txt);
+    (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(function(){ statusEl.textContent='Pins copied to clipboard'; }).catch(function(){ statusEl.textContent='Pins printed in the browser console (F12)'; });
+  };
+
+  // ---------- Room building ----------
+  var roomGroup=null, roomIdx=-1, half=12, stations=[], clickable=[], cur=null;
+  var statusEl=document.getElementById('status'), roomsEl=document.getElementById('rooms'), cap=document.getElementById('cap');
+  function setStatus(){
+    if (tour){ tourSay(); return; }
+    var R=ROOMS[roomIdx], vis=R.list.filter(function(i){return !i.failed;}), tot=vis.filter(function(i){return !i.emb;}).length, ok=vis.filter(function(i){return !i.emb && i.state==='done';}).length;
+    statusEl.textContent = rname(R)+' · '+vis.length+tx('paintings')+(tot&&ok<tot?tx('loading')+ok+'/'+tot+')':'')+tx('link');
+  }
+  function signTex(R){
+    var c=document.createElement('canvas'); c.width=1024; c.height=256; var x=c.getContext('2d');
+    x.fillStyle='rgba(0,0,0,0)'; x.clearRect(0,0,1024,256); x.textAlign='center'; x.fillStyle='#2a2118';
+    x.font='bold 64px Georgia'; wrapText(x,rname(R),512,100,960,70,2);
+    x.fillStyle='#7a5c22'; x.font='italic 36px Georgia'; x.fillText(rsub(R),512,226);
+    return new THREE.CanvasTexture(c);
+  }
+  function enterRoom(i,keep){
+    if (roomGroup) scene.remove(roomGroup);
+    queue.forEach(function(it){ it.state=null; }); queue=[];
+    roomIdx=i; var R=ROOMS[i], vis=R.list.filter(function(it){return !it.failed;}), n=vis.length, per=Math.ceil(n/2), L=Math.max(24, per*5+6); half=L/2;
+    roomGroup=new THREE.Group(); scene.add(roomGroup); stations=[]; clickable=[]; cur=null; cap.style.display='none';
+    roomGroup.add(new THREE.HemisphereLight(0xfff3dc,0x3a3128,.85));
+    var LS=Math.max(8,L/10);
+    for (var z=-half+4; z<=half-3; z+=LS){
+      var pl=new THREE.PointLight(0xffe6bd,(LS>8?1:.7),Math.max(22,LS*1.6)); pl.position.set(0,5.2,z); roomGroup.add(pl);
+      var lamp=new THREE.Mesh(new THREE.BoxGeometry(1.6,.08,1.6), new THREE.MeshBasicMaterial({color:0xfff2d2})); lamp.position.set(0,5.95,z); roomGroup.add(lamp);
+    }
+    wood.repeat.set(6, L/2.8);
+    var floor=new THREE.Mesh(new THREE.PlaneGeometry(12,L), new THREE.MeshStandardMaterial({map:wood,roughness:.55})); floor.rotation.x=-Math.PI/2; roomGroup.add(floor);
+    var ceil=new THREE.Mesh(new THREE.PlaneGeometry(12,L), new THREE.MeshStandardMaterial({color:0xf4efe6})); ceil.rotation.x=Math.PI/2; ceil.position.y=6; roomGroup.add(ceil);
+    var wallMat=new THREE.MeshStandardMaterial({color:R.wall,roughness:.95});
+    [[-6,Math.PI/2],[6,-Math.PI/2]].forEach(function(w){ var m=new THREE.Mesh(new THREE.PlaneGeometry(L,6),wallMat); m.position.set(w[0],3,0); m.rotation.y=w[1]; roomGroup.add(m); });
+    [[-half,0],[half,Math.PI]].forEach(function(w){ var m=new THREE.Mesh(new THREE.PlaneGeometry(12,6),wallMat); m.position.set(0,3,w[0]); m.rotation.y=w[1]; roomGroup.add(m); });
+    [-5.95,5.95].forEach(function(x){ var s=new THREE.Mesh(new THREE.BoxGeometry(.1,.25,L),skirt); s.position.set(x,.125,0); roomGroup.add(s); });
+    for (var bz=-half+8; bz<=half-8; bz+=10){ var b=new THREE.Mesh(new THREE.BoxGeometry(2.4,.45,.8),benchMat); b.position.set(0,.23,bz); roomGroup.add(b); }
+    var sign=new THREE.Mesh(new THREE.PlaneGeometry(8,2), new THREE.MeshBasicMaterial({map:signTex(R),transparent:true})); sign.position.set(0,3.2,-half+.05); roomGroup.add(sign); signMesh=sign;
+
+    vis.forEach(function(it,idx){
+      prep(it);
+      var side=idx%2===0?-1:1, k=Math.floor(idx/2);
+      var g=new THREE.Group(); g.position.set(side*5.9, 2.7, half-3-(k+0)*5 - (per<1?0:0));
+      g.position.z = ((per-1)*2.5) - k*5;      // centred along the hall, first painting nearest the entrance
+      g.rotation.y = side<0 ? Math.PI/2 : -Math.PI/2;
+      var fr=new THREE.Mesh(new THREE.BoxGeometry(3.7,3.7,.14),frameMat); g.add(fr);
+      var mt=new THREE.Mesh(new THREE.PlaneGeometry(3.4,3.4),matMat); mt.position.z=.075; g.add(mt);
+      var pm=new THREE.Mesh(new THREE.PlaneGeometry(1,1), new THREE.MeshBasicMaterial({map: it.tex||it.phTex})); pm.scale.set(3,3,1); pm.position.z=.09; g.add(pm);
+      it.mesh=pm; fitMesh(it);
+      var lb=new THREE.Mesh(new THREE.PlaneGeometry(3.4,.8), new THREE.MeshBasicMaterial({map:it.labelTex})); lb.position.set(0,-2.15,.08); g.add(lb);
+      pm.userData.item=it; lb.userData.item=it; lb.userData.label=true; fr.userData.item=it; mt.userData.item=it; clickable.push(pm,lb,fr,mt);
+      roomGroup.add(g); stations.push({it:it,pos:g.position.clone()});
+    });
+    stations.slice().sort(function(a,b){return b.pos.z-a.pos.z;}).forEach(function(s){ enqueue(s.it); }); pump();
+    if (!keep){ camera.position.set(0,1.7,half-2); yaw=0; pitch=0; nav=null; }
+    var rs=document.getElementById('roomsel'); if (rs) rs.value=String(i);
+    setStatus();
+  }
+  // ---------- Walk tour: visits every room and every painting automatically ----------
+  var tour=null, SPEEDS=[0.5,0.75,1,1.5,2,3];
+  function wrapA(a){ while(a>Math.PI) a-=2*Math.PI; while(a<-Math.PI) a+=2*Math.PI; return a; }
+  var tinfo=document.getElementById('tinfo');
+  // room numbers run 1..N
+  function roomNo(i){ return i+1; }
+  function roomAt(n){ return n-1; }
+  var troom=document.getElementById('troom');
+  ROOMS.forEach(function(R,i){ var o=document.createElement('option'); o.value=i; o.textContent=roomNo(i)+' · '+rname(R); troom.appendChild(o); });
+  troom.onchange=function(){
+    if (!tour) return; var i=+troom.value; if (!ROOMS[i]) return; delete tour.icons;
+    hush(); tour.room=i; tour.seen=[]; tour.tp=0; tour.st=null; tour.phase='enter'; tour.t=0; tour.wait=0; tour.said=false;
+    enterRoom(i); tourSay(); troom.blur();
+  };
+  function tourSay(){ var t=tourText(); statusEl.textContent=t; tinfo.textContent=t; if (troom.value!==String(roomIdx)) troom.value=roomIdx; }
+  function tourText(){ if (tour.icons) return (tour.mus?tx('tourWord')+' · '+tour.mus.n:tx('icnWord'))+' · '+Math.min(tour.seen.length+1,tour.icons.length)+'/'+tour.icons.length+(tour.paused?tx('paused'):''); var R=ROOMS[roomIdx]; return tx('tourWord')+' · '+rname(R)+' · '+Math.min(tour.seen.length+1,stations.length)+'/'+stations.length+(tour.paused?tx('paused'):''); }
+  function setTourBtn(){ var b=document.getElementById('tour'); if (b){ b.textContent=tour?tx('tourStop'):tx('tourGo'); b.classList.toggle('on',!!tour); } document.body.classList.toggle('touring',!!tour); tourUI(); }
+  function tourUI(){ if (!tour) return; document.getElementById('tpause').textContent=tour.paused?tx('resume'):tx('pause'); document.getElementById('tspeed').textContent=SPEEDS[tour.si]+'×'; tourSay(); }
+  function tourPause(){ if (tour){ tour.paused=!tour.paused; if (SS&&rd.on) try{ tour.paused?SS.pause():SS.resume(); }catch(e){} tourUI(); } }
+  function tourSpeed(d){ if (tour){ tour.si=Math.max(0,Math.min(SPEEDS.length-1,tour.si+d)); tourUI(); } }
+  // ---------- Read aloud (speech synthesis) ----------
+  var SS=window.speechSynthesis, rd={on:true,busy:false,cur:null};
+  var treadBtn=document.getElementById('tread');
+  function readLabel(){ treadBtn.textContent=tx('read')+(rd.on?tx('on'):tx('off')); treadBtn.classList.toggle('on',rd.on); var mr0=document.getElementById('mread'); if (mr0){ mr0.textContent=treadBtn.textContent; mr0.classList.toggle('on',rd.on); } }
+  function say(text){
+    if (!SS||!rd.on) return;
+    try{ var u=new SpeechSynthesisUtterance(text); u.lang=tx('speech'); rd.cur=u; rd.busy=true;
+      u.onend=u.onerror=function(){ if (rd.cur===u) rd.busy=false; };
+      var go=function(){ if (rd.cur!==u) return; try{ if (SS.paused) SS.resume(); SS.speak(u); }catch(e){ rd.busy=false; } };
+      if (SS.speaking||SS.pending){ SS.cancel(); setTimeout(go,120); } else go(); }catch(e){ rd.busy=false; }
+  }
+  // iPhone Safari only allows speech after a tap: speak a silent word during the first tap so later (automatic) speech works
+  var unlocked=false;
+  function unlockSpeech(){
+    if (!SS || unlocked) return; unlocked=true;
+    try{ var u=new SpeechSynthesisUtterance(' '); u.volume=0; u.rate=2; SS.speak(u); if (SS.paused) SS.resume(); }catch(e){}
+  }
+  function hush(){ rd.busy=false; rd.cur=null; if (SS) try{ SS.cancel(); }catch(e){} }
+  function toggleRead(){ rd.on=!rd.on; readLabel(); if (!rd.on) hush(); readIt=null; }
+  // title plus ", by Artist" — the artist is left out when the previous piece read aloud was by the same artist
+  var lastArtist='';
+  function spoken(it){
+    var t=(it.title? it.title.replace(/\s*\(.*?\)/g,'') : it.t);
+    if (it.artist && SS && rd.on){ if (it.artist!==lastArtist) t+=', '+tx('by')+' '+it.artist; lastArtist=it.artist; }
+    return t;
+  }
+  if (!SS) treadBtn.style.display='none'; else { readLabel(); treadBtn.onclick=toggleRead; }
+  // manual stepping during the tour: jump to the next / previous painting (crossing into the next / previous room at the ends)
+  function tourOrder(){ return stations.slice().sort(function(a,b){ return (b.pos.z-a.pos.z) || (a.pos.x-b.pos.x); }).map(function(q){ return q.it; }); }
+  function tourManual(){ if (!tour) return null; hush(); tour.paused=false; if (SS) try{ SS.resume(); }catch(e){} tour.wait=0; tour.t=0; return tour; }
+  function tourNext(){
+    var T=tourManual(); if (!T) return;
+    if (T.st && (T.phase==='walk'||T.phase==='dwell') && T.seen.indexOf(T.st.it)<0) T.seen.push(T.st.it);
+    T.phase='pick'; T.st=null; T.said=false; tourUI();
+  }
+  function tourPrev(){
+    var T=tourManual(); if (!T) return;
+    if (T.icons){ var li=(T.st&&(T.phase==='walk'||T.phase==='dwell'))?T.icons.indexOf(T.st.it):T.seen.length; if (li<0) li=T.seen.length; T.seen=T.icons.slice(0,Math.max(0,li-1)); T.phase='pick'; T.st=null; T.said=false; tourUI(); return; }
+    var order=tourOrder(), idx=(T.st&&(T.phase==='walk'||T.phase==='dwell'))?order.indexOf(T.st.it):T.seen.length;
+    if (idx<0) idx=T.seen.length;
+    if (idx>0){ T.seen=order.slice(0,idx-1); T.phase='pick'; T.st=null; T.said=false; }
+    else if (T.room>0){ T.room--; T.tp=0; enterRoom(T.room); T.seen=tourOrder().slice(0,-1); T.phase='enter'; T.t=0; T.st=null; T.said=false; }
+    else { T.seen=[]; T.phase='pick'; T.st=null; T.said=false; }
+    tourUI();
+  }
+  function startTour(){ var r=Math.max(0,roomIdx); tour={room:r,seen:[],phase:'enter',t:0,wait:0,st:null,paused:false,si:2,said:false}; nav=null; hush(); try{ if (document.pointerLockElement) document.exitPointerLock(); }catch(e){} enterRoom(r,true); setTourBtn(); tourSay(); }
+  function stopTour(){ if (!tour) return; tour=null; hush(); setTourBtn(); setStatus(); }
+  function toggleTour(){ if (tour) stopTour(); else startTour(); }
+  document.getElementById('tstop').onclick=function(){ stopTour(); };
+  document.getElementById('tpause').onclick=tourPause;
+  document.getElementById('tprev').onclick=tourPrev;
+  document.getElementById('tnext').onclick=tourNext;
+  document.getElementById('tslow').onclick=function(){ tourSpeed(-1); };
+  document.getElementById('tfast').onclick=function(){ tourSpeed(1); };
+  // distance at which the whole frame and its plaque fit the screen (vertical FOV 70°, narrower screens need more room)
+  function tourDist(){ var tv=Math.tan(35*Math.PI/180), a=camera.aspect; return Math.min(9, Math.max(4.2, (2.3/tv)*1.12, (1.95/(tv*a))*1.05)); }
+  function tourStep(dt,p){
+    var T=tour;
+    pitch+=((T.tp||0)-pitch)*Math.min(1,3*dt);
+    if (T.phase==='enter'){ if (!T.said){ T.said=true; say(rname(ROOMS[roomIdx])); } T.t+=dt; if (T.t>1.6 && !(rd.on&&rd.busy&&T.t<8)) T.phase='pick'; return; }   // pause so the room sign can be read
+    if (T.phase==='pick'){
+      if (T.icons){          // Icons tour: fixed list of masterpieces, moving between rooms as needed
+        var nit=null; for (var q=0;q<T.icons.length;q++){ if (T.seen.indexOf(T.icons[q])<0){ nit=T.icons[q]; break; } }
+        if (!nit){ tour=null; hush(); setTourBtn(); statusEl.textContent=tx('finished'); return; }
+        var ri=ROOMS.indexOf(nit.room); if (ri!==roomIdx){ T.room=ri; T.tp=0; enterRoom(ri); }
+        var nst=stations.filter(function(st){ return st.it===nit; })[0];
+        if (!nst){ T.seen.push(nit); return; }          // this print could not be loaded: skip it
+        fetchInfo(nit); T.st=nst; T.phase='walk'; T.t=0; T.wait=0; T.said=false; tourSay(); return;
+      }
+      var order=stations.slice().sort(function(a,b){ return (b.pos.z-a.pos.z) || (a.pos.x-b.pos.x); });
+      var nxt=order.filter(function(st){ return T.seen.indexOf(st.it)<0; })[0];
+      if (!nxt){
+        if (T.room>=ROOMS.length-1){ tour=null; hush(); setTourBtn(); statusEl.textContent=tx('finished'); return; }
+        T.room++; T.seen=[]; T.tp=0; enterRoom(T.room); T.phase='enter'; T.t=0; T.said=false; tourSay(); return;
+      }
+      fetchInfo(nxt.it); T.st=nxt; T.phase='walk'; T.t=0; T.wait=0; T.said=false; tourSay(); return;
+    }
+    // the room may have been re-laid out (a print was removed): re-find this painting
+    var cur2=stations.filter(function(st){ return st.it===T.st.it; })[0];
+    if (!cur2){ T.phase='pick'; return; }
+    T.st=cur2;
+    var side=cur2.pos.x<0?-1:1, vd=tourDist(), tx=side*(5.9-vd), tz=cur2.pos.z, tyaw=side<0?Math.PI/2:-Math.PI/2;
+    T.tp=Math.atan(0.65/vd);   // aim at the centre of frame + plaque (about 2.35 m high) from eye height 1.7 m
+    if (T.phase==='walk'){
+      var dx=tx-p.x, dz=tz-p.z, d=Math.hypot(dx,dz);
+      var want = d>0.6 ? Math.atan2(-dx,-dz) : tyaw, diff=wrapA(want-yaw);
+      yaw+=Math.max(-2.4*dt,Math.min(2.4*dt,diff));
+      if (d>0.05){ var k=Math.abs(diff)<0.7?1:0.15, step=Math.min(d,3.2*k*dt); p.x+=dx/d*step; p.z+=dz/d*step; }
+      if (d<0.1 && Math.abs(wrapA(tyaw-yaw))<0.06){ T.phase='dwell'; T.t=0; T.wait=0; }
+      return;
+    }
+    if (T.phase==='dwell'){
+      var it=T.st.it, ready=it.emb||it.state==='done';
+      if (!ready && T.wait<10){ T.wait+=dt; return; }          // give a slow image up to 10 s to arrive
+      if (infoOn && !it.emb && it.inf===undefined && T.wait<8){ fetchInfo(it); T.wait+=dt; return; }          // wait a moment for the info card text
+      if (!T.said){ T.said=true; say(spoken(it)+infoSpeech(it)); }
+      var card=infoOn&&it.inf, lim=card?120:20, minT=3.6;      // with an info card, wait until the voice has finished it (120 s is only a safety net)
+      if (card && !(SS&&rd.on)){ var ib2=infoBits(it); minT=3.6+((ib2&&(ib2.head+ib2.text).length)||0)*0.06; }   // voice off: leave time to read the card
+      T.t+=dt; if (T.t>minT && !(rd.on&&rd.busy&&T.t<lim)){ T.seen.push(it); T.phase='pick'; }
+    }
+  }
+
+  // menu
+  var tb=document.createElement('button'); tb.id='tour'; tb.className='room'; tb.textContent=tx('tourGo'); tb.onclick=toggleTour; roomsEl.appendChild(tb);
+  var rsel=document.createElement('select'); rsel.id='roomsel'; rsel.title=tx('choose');
+  ROOMS.forEach(function(R,i){ var o=document.createElement('option'); o.value=i; o.textContent=roomNo(i)+' · '+rname(R); rsel.appendChild(o); });
+  rsel.onchange=function(){ stopTour(); enterRoom(+rsel.value); rsel.blur(); };
+  roomsEl.insertBefore(rsel, tb);
+
+
+  // ---------- Artist search ----------
+  var srch=document.getElementById('srch'), sq=document.getElementById('sq'), sl=document.getElementById('sl'), openArtist='';
+  function artistIndex(){
+    var map={}, out=[];
+    ROOMS.forEach(function(R){ R.list.forEach(function(it){
+      if (it.emb || it.failed || !it.artist) return;
+      var a=map[it.artist]; if (!a){ a=map[it.artist]={name:it.artist, key:norm(it.artist), sort:norm(surname(it.artist)+' '+it.artist), pieces:[]}; out.push(a); }
+      a.pieces.push(it);
+    }); });
+    return out.sort(function(x,y){ return x.sort<y.sort?-1:x.sort>y.sort?1:0; });
+  }
+  function artistMatches(a,q){
+    if (!q) return true; var words=a.key.split(' ');
+    return q.split(' ').every(function(t){ return words.some(function(w){ return w.indexOf(t)===0; }); });
+  }
+  function renderSearch(){
+    var q=norm(sq.value), list=artistIndex().filter(function(a){ return artistMatches(a,q); });
+    sl.innerHTML='';
+    if (!list.length){ var n=document.createElement('div'); n.className='none'; n.textContent=tx('none'); sl.appendChild(n); return; }
+    list.forEach(function(a){
+      var row=document.createElement('div'); row.className='ar';
+      var nm=document.createElement('div'); nm.textContent=a.name; var ct=document.createElement('span'); ct.textContent=a.pieces.length+(a.pieces.length===1?tx('work'):tx('works'));
+      row.appendChild(nm); row.appendChild(ct); sl.appendChild(row);
+      var open = openArtist===a.name || list.length===1;
+      row.onclick=function(){ openArtist = (openArtist===a.name && list.length>1) ? '' : a.name; renderSearch(); };
+      if (open) a.pieces.forEach(function(it){
+        var b=document.createElement('button'); b.className='pc'; b.textContent=it.title;
+        var sm=document.createElement('small'); sm.textContent=rname(it.room); b.appendChild(sm);
+        b.onclick=function(){ gotoPiece(it); }; sl.appendChild(b);
+      });
+    });
+  }
+  function openSearch(){ stopTour(); srch.style.display='block'; sq.value=''; openArtist=''; renderSearch(); setTimeout(function(){ try{ sq.focus(); }catch(e){} },50); }
+  function closeSearch(){ srch.style.display='none'; try{ sq.blur(); }catch(e){} lastAct=Date.now(); }
+  function gotoPiece(it){
+    var ri=ROOMS.indexOf(it.room); closeSearch(); stopTour();
+    if (ri>=0 && ri!==roomIdx) enterRoom(ri);
+    goArt(it);
+  }
+  var lastRnd=null;
+  function randomPiece(){
+    var all=[]; artistIndex().forEach(function(a){ a.pieces.forEach(function(it){ all.push(it); }); });
+    if (!all.length) return;
+    var pool=all.length>1 ? all.filter(function(it){ return it!==lastRnd; }) : all;
+    lastRnd=pool[Math.floor(Math.random()*pool.length)];
+    gotoPiece(lastRnd);
+  }
+  document.getElementById('srnd').addEventListener('click', randomPiece);
+  var sb=document.createElement('button'); sb.className='room'; sb.textContent=tx('artists'); sb.setAttribute('data-i','artists'); sb.onclick=openSearch; roomsEl.insertBefore(sb, tb);
+
+  // ---------- Icons: the record-breaking masterpieces, tap one to walk straight up to it ----------
+  var ICON_TS=['Salvator Mundi — Leonardo da Vinci', 'The Card Players (Qatar version) — Paul Cézanne', 'Portrait of Elisabeth Lederer — Gustav Klimt', 'Nafea Faa Ipoipo (When Will You Marry?) — Paul Gauguin', 'The Standard Bearer — Rembrandt van Rijn', 'Water Serpents II — Gustav Klimt', 'Portrait of Marten Soolmans — Rembrandt van Rijn', 'Portrait of Oopjen Coppit — Rembrandt van Rijn', 'Nu Couché (Reclining Nude) — Amedeo Modigliani', 'Nu Couché (sur le côté gauche) — Amedeo Modigliani', 'Portrait of Adele Bloch-Bauer II — Gustav Klimt', 'Les Poseuses (Ensemble, small version) — Georges Seurat', 'Mont Sainte-Victoire — Paul Cézanne', 'Portrait of Adele Bloch-Bauer I — Gustav Klimt', 'The Scream (Pastel Version) — Edvard Munch', 'Orchard with Cypresses (Verger avec cyprès) — Vincent van Gogh', 'Meules (Haystacks) — Claude Monet', 'Maternité II — Paul Gauguin', 'Birch Forest — Gustav Klimt', 'Portrait of a Young Man Holding a Roundel — Sandro Botticelli', 'Blumenwiese (Blooming Meadow) — Gustav Klimt', 'Suprematist Composition — Kazimir Malevich', 'Nymphéas en fleur — Claude Monet', 'Portrait of Dr. Gachet — Vincent van Gogh', 'Ploughman in a Field (Laboureur dans un champ) — Vincent van Gogh', 'Le Bassin aux Nymphéas (Water Lily Pond) — Claude Monet', 'Bal du moulin de la Galette — Pierre-Auguste Renoir', 'Massacre of the Innocents — Peter Paul Rubens', 'Self-Portrait without Beard — Vincent van Gogh', 'Waldabhang in Unterach am Attersee — Gustav Klimt', 'Cabanes de bois parmi les oliviers et cyprès — Vincent van Gogh', 'Le Grand Canal — Claude Monet', 'Romans parisiens (Les Livres jaunes) — Vincent van Gogh', 'Rideau, Cruchon et Compotier — Paul Cézanne', 'Lot and His Daughters — Peter Paul Rubens', 'Portrait of Joseph Roulin — Vincent van Gogh', 'Nature morte à la nappe à carreaux — Juan Gris', 'Meules à Giverny — Claude Monet', 'Irises — Vincent van Gogh', 'Les Alyscamps (Allée des Alyscamps) — Vincent van Gogh', 'Te Fare (La Maison) — Paul Gauguin', 'Head of a Muse — Raphael', 'Head of a Young Apostle — Raphael', 'Rome, from Mount Aventine — J.M.W. Turner', 'Peasant Woman Against a Background of Wheat — Vincent van Gogh', 'Modern Rome – Campo Vaccino — J.M.W. Turner', 'Venice, the Rialto Bridge with the Palazzo dei Camerlenghi — Francesco Guardi', 'Bauerngarten (Flower Garden) — Gustav Klimt', 'Water Lilies — Claude Monet', 'Le Pont du chemin de fer à Argenteuil — Claude Monet'];
+  var icn=document.getElementById('icn'), icl=document.getElementById('icl');
+  function iconItem(k){ var f=null; ROOMS.forEach(function(R){ R.list.forEach(function(x){ if (x.t===k && !x.failed && (!f || f.failed)) f=x; }); }); return f; }
+  function renderIcons(){
+    icl.innerHTML=''; var n=0;
+    ICON_TS.forEach(function(k){
+      var it=iconItem(k); if (!it || it.failed || it.emb) return; n++;
+      var b=document.createElement('button'); b.className='pc'; b.type='button'; b.textContent=it.title;
+      var sm=document.createElement('small'); sm.textContent=it.artist+' · '+rname(it.room); b.appendChild(sm);
+      b.onclick=function(){ closeIcons(); gotoPiece(it); }; icl.appendChild(b);
+    });
+    if (!n){ var d=document.createElement('div'); d.className='none'; d.textContent=tx('none'); icl.appendChild(d); }
+  }
+  function openIcons(){ stopTour(); icn.style.display='block'; renderIcons(); icl.scrollTop=0; }
+  function closeIcons(){ icn.style.display='none'; lastAct=Date.now(); }
+  document.getElementById('icx').addEventListener('click', closeIcons);
+  function startListTour(list,mus){
+    if (!list.length) return;
+    closeIcons(); if (typeof closeMus==='function') closeMus(); welcome=false; hush(); nav=null; try{ if (document.pointerLockElement) document.exitPointerLock(); }catch(e){}
+    tour={room:roomIdx,seen:[],phase:'pick',t:0,wait:0,st:null,paused:false,si:2,said:false,tp:0,icons:list,mus:mus||null};
+    setTourBtn(); tourSay();
+  }
+  function startIconsTour(){
+    var list=[]; ICON_TS.forEach(function(k){ var it=iconItem(k); if (it && !it.failed && !it.emb) list.push(it); });
+    startListTour(list,null);
+  }
+  document.getElementById('icgo').addEventListener('click', startIconsTour);
+  addEventListener('keydown', function(e){ if (icn.style.display==='block'){ if (e.code==='Escape') closeIcons(); e.stopPropagation(); } }, true);
+  // ---------- Museums: top museums / collections, their masterpieces in the gallery, and a walk tour per museum ----------
+  var MUSEUMS=[{"id": "louvre", "n": "Louvre Museum", "c": "Paris", "ce": "París"}, {"id": "prado", "n": "Museo del Prado", "c": "Madrid", "ce": "Madrid"}, {"id": "met", "n": "The Metropolitan Museum of Art", "c": "New York", "ce": "Nueva York"}, {"id": "rijks", "n": "Rijksmuseum", "c": "Amsterdam", "ce": "Ámsterdam"}, {"id": "ng", "n": "National Gallery", "c": "London", "ce": "Londres"}, {"id": "orsay", "n": "Musée d'Orsay", "c": "Paris", "ce": "París"}, {"id": "uffizi", "n": "Uffizi Gallery", "c": "Florence", "ce": "Florencia"}, {"id": "vatican", "n": "Vatican Museums", "c": "Vatican City", "ce": "Ciudad del Vaticano"}, {"id": "aic", "n": "Art Institute of Chicago", "c": "Chicago", "ce": "Chicago"}, {"id": "vgm", "n": "Van Gogh Museum", "c": "Amsterdam", "ce": "Ámsterdam"}, {"id": "moma", "n": "Museum of Modern Art (MoMA)", "c": "New York", "ce": "Nueva York"}, {"id": "hermitage", "n": "State Hermitage Museum", "c": "Saint Petersburg", "ce": "San Petersburgo"}, {"id": "khm", "n": "Kunsthistorisches Museum", "c": "Vienna", "ce": "Viena"}, {"id": "belvedere", "n": "Belvedere", "c": "Vienna", "ce": "Viena"}, {"id": "nga", "n": "National Gallery of Art", "c": "Washington, D.C.", "ce": "Washington, D. C."}, {"id": "mauritshuis", "n": "Mauritshuis", "c": "The Hague", "ce": "La Haya"}, {"id": "tate", "n": "Tate", "c": "London", "ce": "Londres"}];
+  var MUS_T={"louvre": ["Mona Lisa", "Oath of the Horatii", "La Grande Odalisque", "The Turkish Bath", "The Raft of the Medusa", "The Raft of the Méduse", "Liberty Leading the People", "The Wedding at Cana", "The Death of Sardanapalus", "Women of Algiers in their Apartment", "Pilgrimage to Cythera", "Pierrot", "Diana Leaving her Bath", "The Moneylender and His Wife", "Winged Victory of Samothrace"], "prado": ["Las Meninas", "The Surrender of Breda", "The Garden of Earthly Delights", "The Haywain Triptych", "The Adoration of the Magi", "The Table of the Seven Deadly Sins", "The Third of May 1808", "The Second of May 1808", "Saturn Devouring His Son", "The Clothed Maja (La maja vestida)", "The Nude Maja (La maja desnuda)", "Witches' Sabbath (El aquelarre)", "The Family of Charles IV", "The Dog (El perro)", "Duel with Cudgels (Duelo a garrotazos)", "Self-Portrait (ca. 1796)", "The Nobleman with his Hand on his Chest", "The Adoration of the Shepherds", "The Trinity", "The Spinners (Las Hilanderas)", "The Triumph of Bacchus (Los Borrachos)", "The Forge of Vulcan", "Mercury and Argus", "Christ Crucified", "The Immaculate Conception of Los Venerables", "The Holy Family with the Little Bird", "Agnus Dei", "The Martyrdom of Saint Philip", "Saint Andrew", "Jacob's Dream", "The Descent from the Cross", "The Three Graces", "David with the Head of Goliath", "Artemisia", "The Garden of Love", "The Judgment of Paris|Peter Paul Rubens", "The Triumph of Death", "Equestrian Portrait of Charles V", "The Annunciation", "Self-Portrait (1498)", "Christ Washing the Disciples' Feet", "The Cardinal", "Mona Lisa (Prado version)", "Danaë and the Shower of Gold", "Venus and Adonis", "The Worship of Venus", "Adam and Eve", "The Wine of Saint Martin's Day", "Death of the Virgin", "Portrait of a Man", "Children on the Beach (Chicos en la playa)", "Children on the Seashore (Niños en la playa)"], "met": ["The Great Wave off Kanagawa (Kanagawa-oki Nami Ura)", "The Great Wave off Kanagawa", "Fine Wind, Clear Morning (Gaifū Kaisei)", "Thunderstorm Beneath the Summit (Sanka Hakuu)", "Kajikazawa in Kai Province (Kōshū Kajikazawa)", "Chōshi in Shimōsa (Sōshū Chōshi, from Oceans of Wisdom)", "View of Toledo", "Cardinal Fernando Niño de Guevara", "The Vision of Saint John", "Portrait of Juan de Pareja", "Don Andrés de Andrade y la Cal", "The Holy Family with Saints Anne and Catherine of Alexandria", "Majas on a Balcony", "Manuel Osorio Manrique de Zuñiga (\"The Red Boy\")", "Condesa de Altamira and Her Daughter, María Agustina", "Bullfight, Suerte de Varas", "Autumn Rhythm (Number 30)", "Bridge over a Pond of Water Lilies", "Wheat Field with Cypresses", "Cypresses", "Madame Georges Charpentier and Her Children", "The Gulf of Marseilles Seen from L'Estaque", "Rideau, Cruchon et Compotier", "Two Tahitian Women", "Circus Sideshow (Parade de cirque)", "Max Schmitt in a Single Scull", "The Gulf Stream", "Portrait of Madame X", "The Death of Socrates", "The Abduction of Rebecca", "Woman with a Parrot", "Boy with a Sword", "The Horse Fair", "Ville-d'Avray", "Young Woman with a Water Pitcher", "A Maid Asleep", "Allegory of the Catholic Faith", "Aristotle with a Bust of Homer", "The Musicians", "The Fortune Teller", "Mezzetin", "The Toilet of Venus", "The Love Letter", "Mrs. Grace Dalrymple Elliott", "The Harvesters", "Venus and the Lute Player", "The Crucifixion; The Last Judgment", "Portrait of a Carthusian", "The Oxbow", "Heart of the Andes", "Washington Crossing the Delaware", "The Rocky Mountains, Lander's Peak", "A Gorge in the Mountains (Kauterskill Clove)"], "rijks": ["The Night Watch", "The Milkmaid", "The Jewish Bride", "The Windmill at Wijk bij Duurstede", "The Merry Family", "Portrait of Marten Soolmans", "Portrait of Oopjen Coppit"], "ng": ["The Rokeby Venus", "The Arnolfini Portrait", "Bacchus and Ariadne", "The Ambassadors", "The Hay Wain", "The Fighting Temeraire", "Rain, Steam and Speed", "Rain, Steam and Speed – The Great Western Railway", "The Avenue at Middelharnis", "Saint Francis in Meditation", "Portrait of a Man (Self Portrait?)", "Bathers at Asnières", "Summer's Day", "Sunflowers"], "orsay": ["Le Déjeuner sur l'herbe", "Olympia", "Bal du moulin de la Galette", "L'Absinthe", "The Floor Scrapers", "The Cradle", "Flood at Port-Marly", "The Gleaners", "The Angelus", "A Burial at Ornans", "Arrangement in Grey and Black No. 1 (Whistler's Mother)", "Plowing in the Nivernais", "The Circus", "The Card Players", "Le Pont du chemin de fer à Argenteuil", "Self-Portrait without Beard", "The Birth of Venus|Alexandre Cabanel"], "uffizi": ["Primavera", "The Birth of Venus|Sandro Botticelli", "Venus of Urbino", "Judith Slaying Holofernes"], "vatican": ["The Creation of Adam", "The School of Athens", "Laocoön and His Sons"], "aic": ["American Gothic", "Nighthawks", "A Sunday Afternoon on the Island of La Grande Jatte", "A Sunday on La Grande Jatte", "Two Sisters (On the Terrace)", "Woman at the Piano", "Acrobats at the Cirque Fernando", "The Millinery Shop", "Woman at Her Toilette", "Stacks of Wheat (End of Summer)", "Arrival of the Normandy Train, Gare Saint-Lazare", "Day of the God (Mahana no atua)", "Moulin de la Galette", "At the Moulin Rouge", "The Child's Bath", "Paris Street; Rainy Day", "The Basket of Apples", "Old Man with a Gold Chain", "The Herring Net", "The Crucifixion", "Saint George and the Dragon", "The Assumption of the Virgin"], "vgm": ["The Bedroom", "Romans parisiens (Les Livres jaunes)"], "moma": ["The Starry Night", "Les Demoiselles d'Avignon", "The Persistence of Memory", "The Sleeping Gypsy", "The Dream", "Christina's World", "I and the Village", "Unique Forms of Continuity in Space"], "hermitage": ["The Dance", "The Boulevard Montmartre on a Winter Morning"], "khm": ["The Hunters in the Snow", "The Tower of Babel", "The Peasant Wedding", "The Art of Painting"], "belvedere": ["The Kiss", "Birch Forest", "Blumenwiese (Blooming Meadow)", "Bauerngarten (Flower Garden)"], "nga": ["Woman with a Parasol - Madame Monet and Her Son", "Breezing Up (A Fair Wind)", "Two Women at a Window", "Niagara"], "mauritshuis": ["Girl with a Pearl Earring", "View of Delft", "The Anatomy Lesson of Dr. Nicolaes Tulp", "The Goldfinch"], "tate": ["Ophelia", "The Lady of Shalott", "Proserpine", "Carnation, Lily, Lily, Rose", "Marilyn Diptych"]};
+  (function(){ var MADD={
+    louvre:['The Coronation of Napoleon','The Virgin of the Rocks (Louvre version)','The Lacemaker','The Astronomer','The Death of the Virgin','The Fortune Teller|Caravaggio','The Cheat with the Ace of Diamonds','Magdalene with the Smoking Flame','Bathsheba at Her Bath','The Intervention of the Sabine Women','Venus de Milo'],
+    met:['Self-Portrait with a Straw Hat','Madonna and Child Enthroned with Saints','Mäda Primavesi'],
+    vatican:['The Last Judgment','The Transfiguration','The Entombment of Christ','Disputation of the Holy Sacrament','The Deliverance of Saint Peter','The Parnassus','Saint Jerome in the Wilderness','The Expulsion of Heliodorus from the Temple','The Fire in the Borgo','Foligno Madonna','Oddi Altarpiece','Stefaneschi Triptych','Saint Matthew and the Angel (Cappella Niccolina)','The Delphic Sibyl','The Libyan Sibyl','Apollo Belvedere','Belvedere Torso'],
+    bm:['Admonitions of the Instructress to the Court Ladies','Rhinoceros (Woodcut)','Melencolia I (Engraving)','The Three Crosses (Drypoint)','Faust (Etching)','Head of a Young Woman (Drawing)','Studies for the Libyan Sibyl (Drawing)','The Dream of Human Life (Drawing)','Book of the Dead of Hunefer','Book of the Dead of Ani','Nebamun Hunting in the Marshes','The Rosetta Stone','Lewis Chessmen','Sutton Hoo Helmet','Portland Vase','Standard of Ur','Lion Hunt of Ashurbanipal',"Hoa Hakananai'a (Moai)"],
+    hermitage:['The Return of the Prodigal Son','Madonna Litta','Benois Madonna','Danaë','The Lute Player','Judith','Conestabile Madonna','Saint Sebastian','Flora|Rembrandt van Rijn','The Union of Earth and Water','Portrait of a Lady in Blue','Woman Holding a Fan','Lady in the Garden','Lilac Bush','White House at Night','Woman Holding a Fruit','Composition VI','The Three Maries at the Tomb'],
+    uffizi:['Annunciation','Medusa','Doni Tondo (The Holy Family)','Bacchus','Madonna of the Goldfinch','Diptych of Federico da Montefeltro and Battista Sforza','Adoration of the Magi|Leonardo da Vinci','Ognissanti Madonna','The Battle of San Romano','Portinari Triptych','Madonna with the Long Neck','Calumny of Apelles (La Calunnia)','Adoration of the Magi|Sandro Botticelli','Portrait of Pope Leo X with Two Cardinals','The Baptism of Christ|Andrea del Verrocchio','Flora|Titian'],
+    ng:['The Virgin of the Rocks (London version)','Supper at Emmaus','Venus and Mars','The Baptism of Christ|Piero della Francesca','The Wilton Diptych','A Young Woman Standing at a Virginal','Self-Portrait at the Age of 34','The Umbrellas','The Water-Lily Pond','Whistlejacket','An Experiment on a Bird in the Air Pump'],
+    rijks:['The Little Street','Woman Reading a Letter','The Love Letter|Johannes Vermeer','Self-Portrait as the Apostle Paul',"The Syndics of the Drapers' Guild",'The Threatened Swan','Winter Landscape with Ice Skaters','The Merry Drinker','Portrait of a Couple (Isaac Abrahamsz Massa and Beatrix van der Laen)','The Feast of Saint Nicholas','The Battle of Waterloo','Still Life with Flowers in a Glass Vase|Jan Davidsz. de Heem','Girl in a White Kimono'],
+    orsay:['Starry Night Over the Rhône',"The Origin of the World (L'Origine du monde)",'Poppies (Coquelicots)','Bedroom in Arles (3rd Version)','The Church at Auvers','Tahitian Women on the Beach','London, Houses of Parliament'],
+    moma:['Water Lilies (Agapanthus Triptych)','The Bather','Hope, II','The Olive Trees','Dynamism of a Soccer Player','The City Rises','Street, Dresden','Suprematist Composition: White on White','Evening, Honfleur','Port-en-Bessin, Entrance to the Harbor','The Seed of the Areoi','La Goulue Arriving at the Moulin Rouge','Divan Japonais (Lithograph)','Melancholy and Mystery of a Street']
+  };
+  // the British Museum joins the top-museums list (right after the National Gallery)
+  if (!MUSEUMS.some(function(m){ return m.id==='bm'; })) MUSEUMS.splice(5,0,{"id":"bm","n":"The British Museum","c":"London","ce":"Londres"});
+  // two earlier entries share a title with new works by other artists: key them by artist too
+  var FIX={'The Fortune Teller':'The Fortune Teller|Georges de La Tour','The Love Letter':'The Love Letter|Jean-Honoré Fragonard'};
+  MUS_T.met=MUS_T.met.map(function(k){ return FIX[k]||k; });
+  Object.keys(MADD).forEach(function(k){ MUS_T[k]=(MUS_T[k]||[]).concat(MADD[k]); });
+  })();
+  var MUS_IDX=null, mus=document.getElementById('mus'), musl=document.getElementById('musl'), curMus=null;
+  function musIndex(){ if (MUS_IDX) return MUS_IDX; MUS_IDX={}; MUSEUMS.forEach(function(m){ (MUS_T[m.id]||[]).forEach(function(e){ MUS_IDX[e]=m.id; }); }); return MUS_IDX; }
+  function musOf(it){ var x=musIndex(); return x[it.title+'|'+it.artist]||x[it.title]||null; }
+  function musItems(m){ var out=[], seen={}; ROOMS.forEach(function(R){ R.list.forEach(function(it){ if (it.emb||it.failed||seen[it.t]||musOf(it)!==m.id) return; seen[it.t]=1; out.push(it); }); }); return out; }
+  function musCity(m){ return LANG==='es'?m.ce:m.c; }
+  function renderMus(){
+    var back=document.getElementById('musb'), go=document.getElementById('musgo'), head=document.getElementById('mush'), note=document.getElementById('musn');
+    musl.innerHTML='';
+    if (!curMus){
+      back.style.display='none'; go.style.display='none'; head.textContent=tx('musT'); note.textContent=tx('musN');
+      MUSEUMS.forEach(function(m){ var n=musItems(m).length; if (!n) return;
+        var b=document.createElement('button'); b.className='pc'; b.type='button'; b.textContent=m.n;
+        var sm=document.createElement('small'); sm.textContent=musCity(m)+' · '+n+(n===1?tx('work'):tx('works')); b.appendChild(sm);
+        b.onclick=function(){ curMus=m; renderMus(); musl.scrollTop=0; }; musl.appendChild(b); });
+      return;
+    }
+    var list=musItems(curMus);
+    back.style.display='inline-block'; head.textContent=curMus.n; note.textContent=musCity(curMus)+' · '+list.length+(list.length===1?tx('work'):tx('works'));
+    go.style.display='block'; go.textContent=tx('musGo');
+    list.forEach(function(it){ var b=document.createElement('button'); b.className='pc'; b.type='button'; b.textContent=it.title;
+      var sm=document.createElement('small'); sm.textContent=it.artist+' · '+rname(it.room); b.appendChild(sm);
+      b.onclick=function(){ closeMus(); gotoPiece(it); }; musl.appendChild(b); });
+    if (!list.length){ var d=document.createElement('div'); d.className='none'; d.textContent=tx('none'); musl.appendChild(d); }
+  }
+  function openMus(){ stopTour(); curMus=null; mus.style.display='block'; renderMus(); musl.scrollTop=0; }
+  function closeMus(){ mus.style.display='none'; lastAct=Date.now(); }
+  document.getElementById('musx').addEventListener('click', closeMus);
+  document.getElementById('musb').addEventListener('click', function(){ curMus=null; renderMus(); musl.scrollTop=0; });
+  document.getElementById('musgo').addEventListener('click', function(){ if (curMus) startListTour(musItems(curMus),curMus); });
+  addEventListener('keydown', function(e){ if (mus.style.display==='block'){ if (e.code==='Escape'){ if (curMus){ curMus=null; renderMus(); } else closeMus(); } e.stopPropagation(); } }, true);
+  var mub=document.createElement('button'); mub.id='musbtn'; mub.className='room'; mub.type='button'; mub.textContent=tx('museums'); mub.setAttribute('data-i','museums'); mub.onclick=openMus; roomsEl.insertBefore(mub, tb);
+  var ib=document.createElement('button'); ib.id='iconsbtn'; ib.className='room'; ib.type='button'; ib.textContent=tx('icons'); ib.setAttribute('data-i','icons'); ib.title=tx('icnTip'); ib.setAttribute('aria-label',tx('icnTip')); ib.onclick=openIcons; roomsEl.insertBefore(ib, tb);
+
+  // ---------- WhatsApp share: a message with a link that opens FacePro at this exact painting ----------
+  var SHARE_BASE='https://easylandx.github.io/facepro/';
+  function slug(s){ return norm(s).replace(/ /g,'-'); }
+  function artURL(it){ return SHARE_BASE+'#r='+slug(it.room.name)+'&a='+slug(it.qt); }
+  function waItem(){
+    if (tour && tour.st) return tour.st.it;
+    if (cur) return cur.it;
+    var p=camera.position, best=null, bd=1e9;
+    stations.forEach(function(q){ var d=Math.hypot(q.pos.x-p.x,q.pos.z-p.z); if (d<bd){ bd=d; best=q; } });
+    return best&&best.it;
+  }
+  function shareWA(){
+    var it=waItem(); if (!it) return;
+    var q=encodeURIComponent(tx('waMsg')+'\n'+it.t+'\n'+artURL(it)), ua=navigator.userAgent||'';
+    var ios=/iPhone|iPad|iPod/i.test(ua) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+    var android=/Android/i.test(ua);
+    if (ios){ location.href='https://wa.me/?text='+q; }                       // universal link: opens the WhatsApp app directly
+    else if (android){ location.href='whatsapp://send?text='+q;                // app opens directly; fall back to the web link if it is not installed
+      setTimeout(function(){ if (!document.hidden) location.href='https://wa.me/?text='+q; },1800); }
+    else { var u='https://web.whatsapp.com/send?text='+q, w=window.open(u,'_blank');   // desktop: straight to WhatsApp Web
+      if (w){ try{ w.opener=null; }catch(e){} } else location.href=u; }
+  }
+  var wb=document.createElement('button'); wb.className='room wa'; wb.id='mwa'; wb.title='WhatsApp'; wb.innerHTML='<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413Z"/></svg>'+'<span>WhatsApp</span>'; wb.onclick=shareWA; roomsEl.insertBefore(wb, tb);
+  document.getElementById('twa').onclick=shareWA;
+
+  // ---------- Info card: year, museum and a short description (Wikipedia / Wikidata, cached on this device) ----------
+  var ICACHE='facepro-info-v2', icache={}, infoOn=true;
+  try{ icache=JSON.parse(localStorage.getItem(ICACHE)||'{}'); infoOn=localStorage.getItem('facepro-info')!=='0'; }catch(e){}
+  // whole sentences only: abbreviation-aware split (J. M. W. Turner, n.º, a. C., ca. …), nested brackets removed, never cut mid-sentence
+  var ABBR=/^(n|no|nº|ca|c|sr|sra|dr|dra|dña|ud|uds|etc|aprox|núm|pág|págs|vol|st|mr|mrs|jr|fig|vs|a|d|s|ss|p|pp|fl|ed|op|cat|inv)$/i;
+  function sents(t){
+    var out=[], last=0, re=/[.!?]+["»”)]?\s+(?=[A-ZÁÉÍÓÚÑÜ¿¡«"“])/g, m;
+    while ((m=re.exec(t))){ var w=t.slice(0,m.index).split(/\s/).pop().replace(/[^A-Za-zÁÉÍÓÚÑÜáéíóúñüº]/g,''); if (w.length<2 ? /[A-ZÁÉÍÓÚÑ]/.test(w)||ABBR.test(w) : ABBR.test(w)) continue;
+      out.push(t.slice(last,m.index+m[0].replace(/\s+$/,'').length)); last=m.index+m[0].length; }
+    if (last<t.length) out.push(t.slice(last)); return out;
+  }
+  function clean(t){
+    t=(t||'').replace(/\s+/g,' '); while (/\([^()]*\)/.test(t)) t=t.replace(/\s*\([^()]*\)/g,'');
+    t=t.replace(/\s+([,.;:])/g,'$1').replace(/\[\d+\]/g,'').trim(); if (!t) return '';
+    var ss=sents(t), r=ss[0]||''; if (ss[1] && (r+' '+ss[1]).length<=380) r+=' '+ss[1];
+    if (r.length>520){ var k=Math.max(r.lastIndexOf(', ',470), r.lastIndexOf('; ',470)); if (k>150) r=r.slice(0,k)+'.'; }
+    return /[.!?"»”]$/.test(r) ? r : r+'.';
+  }
+  function fetchInfo(it){
+    if (it.emb || it.inf!==undefined || it.infP) return; var key=it.title+'|'+it.artist;
+    if (icache[key]!==undefined){ it.inf=icache[key]; return infoReady(it); }
+    it.infP=true;
+    wjf('https://en.wikipedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrlimit=5&gsrsearch='+enc(strip(it.qt)+' '+surname(it.artist)+' painting')+'&prop=extracts|pageprops&exintro=1&explaintext=1&ppprop=wikibase_item').then(function(d){
+      var ps=d&&d.query&&d.query.pages; if (!ps) return null;
+      var h=Object.keys(ps).map(function(k){ return ps[k]; }).sort(function(a,b){ return a.index-b.index; }).filter(function(p){ return p.pageprops&&p.pageprops.wikibase_item && titleOK(it,p.title) && (it.anon||artistOK(it,p.extract||'')); })[0];
+      if (!h) return null; var q=h.pageprops.wikibase_item, en=clean(h.extract);
+      return wjf('https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&origin=*&props=claims|sitelinks&sitefilter=eswiki&ids='+q).then(function(w){
+        var e=w&&w.entities&&w.entities[q]; if (!e) return {y:'',m:{},t:{en:en}};
+        var c=e.claims||{}, tv=c.P571&&c.P571[0]&&c.P571[0].mainsnak&&c.P571[0].mainsnak.datavalue, y='';
+        if (tv&&tv.value&&tv.value.precision>=9){ var mt=/^([+-])0*(\d+)-/.exec(tv.value.time); if (mt) y=mt[1]==='-'?mt[2]+' BC':mt[2]; }
+        var mid=[c.P195,c.P276].map(function(a){ var sn=a&&a[0]&&a[0].mainsnak&&a[0].mainsnak.datavalue; return sn&&sn.value&&sn.value.id; }).filter(Boolean)[0];
+        var est=e.sitelinks&&e.sitelinks.eswiki&&e.sitelinks.eswiki.title;
+        return Promise.all([
+          mid ? wjf('https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&origin=*&props=labels&languages=en|es&ids='+mid) : null,
+          est ? wjf('https://es.wikipedia.org/w/api.php?action=query&format=json&origin=*&prop=extracts&exintro=1&explaintext=1&titles='+enc(est)) : null
+        ]).then(function(r){
+          var lb=r[0]&&r[0].entities&&r[0].entities[mid]&&r[0].entities[mid].labels||{}, ep=r[1]&&r[1].query&&r[1].query.pages, es='';
+          if (ep){ var k=Object.keys(ep)[0]; es=clean(ep[k]&&ep[k].extract); }
+          return {y:y, m:{en:lb.en&&lb.en.value, es:(lb.es&&lb.es.value)||(lb.en&&lb.en.value)}, t:{en:en, es:es}};
+        });
+      });
+    }).catch(function(){ return null; }).then(function(inf){
+      it.infP=false; it.inf=inf||null; icache[key]=it.inf; try{ localStorage.setItem(ICACHE,JSON.stringify(icache)); }catch(e){}
+      infoReady(it);
+    });
+  }
+  function infoReady(it){ if (cur && cur.it===it) showInfo(it); }
+  function infoBits(it){ var f=it.inf; if (!infoOn||!f) return null; var m=f.m&&(f.m[LANG]||f.m.en), t=f.t&&f.t[LANG]; return {head:[f.y,m].filter(Boolean).join(' · '), text:t||''}; }
+  function showInfo(it){
+    var el=cap.querySelector('.inf'); if (!el) return; var b=infoBits(it);
+    el.innerHTML=''; cap.classList.toggle('noinf',!(b&&(b.head||b.text))); if (!b) return;
+    if (b.head){ var y=document.createElement('span'); y.className='y'; y.textContent=b.head; el.appendChild(y); }
+    if (b.text) el.appendChild(document.createTextNode(b.text));
+  }
+  function infoSpeech(it){ var b=infoBits(it); return b ? '. '+[b.head,b.text].filter(Boolean).join('. ') : ''; }
+  function infoLabel(){ var l='ℹ︎ Info: '+(infoOn?tx('on'):tx('off')); ['tcard','mcard'].forEach(function(id){ var e=document.getElementById(id); if (e){ e.textContent=l; e.classList.toggle('on',infoOn); } }); document.body.classList.toggle('info-on',infoOn); }
+  function toggleInfo(){ infoOn=!infoOn; try{ localStorage.setItem('facepro-info',infoOn?'1':'0'); }catch(e){} infoLabel(); if (cur){ fetchInfo(cur.it); showInfo(cur.it); } if (!infoOn) hush(); }
+  var ib=document.createElement('button'); ib.className='room'; ib.id='mcard'; ib.onclick=toggleInfo; roomsEl.insertBefore(ib, tb);
+  document.getElementById('tcard').onclick=toggleInfo;
+  var mr=document.createElement('button'); mr.className='room'; mr.id='mread'; mr.onclick=toggleRead; roomsEl.insertBefore(mr, tb); if (!SS) mr.style.display='none'; readLabel();
+
+  // ---------- Previous / next painting (across all rooms) while walking freely ----------
+  function artStep(d){
+    if (tour){ if (d>0) tourNext(); else tourPrev(); return; }
+    hush(); readIt=null;
+    var order=tourOrder(), base=waItem(), idx=order.indexOf(base), target;
+    if (idx>=0 && order[idx+d]) target=order[idx+d];
+    else { var ri=(roomIdx+(idx<0?0:d)+ROOMS.length)%ROOMS.length; if (idx>=0 || ri!==roomIdx) enterRoom(ri); var o2=tourOrder(); target=idx<0 ? o2[0] : (d>0?o2[0]:o2[o2.length-1]); }
+    if (target) goArt(target);
+  }
+  var pb=document.createElement('button'); pb.className='room'; pb.id='mprev'; pb.setAttribute('data-i','prev'); pb.innerHTML=tx('prev'); pb.title='Previous painting (P)'; pb.onclick=function(){ artStep(-1); };
+  var nb=document.createElement('button'); nb.className='room'; nb.id='mnext'; nb.setAttribute('data-i','next'); nb.innerHTML=tx('next'); nb.title='Next painting (N)'; nb.onclick=function(){ artStep(1); };
+  roomsEl.insertBefore(pb, sb); roomsEl.insertBefore(nb, sb);
+  sq.addEventListener('input', function(){ openArtist=''; renderSearch(); });
+  document.getElementById('sx').onclick=closeSearch;
+
+
+  // ---------- About popup ----------
+  var aboutEl=document.getElementById('about');
+  function openAbout(){ aboutEl.classList.add('show'); }
+  function closeAbout(){ aboutEl.classList.remove('show'); }
+  [].forEach.call(document.querySelectorAll('.abt'), function(b){ b.addEventListener('click', function(e){ e.stopPropagation(); openAbout(); }); });
+  document.getElementById('aboutx').addEventListener('click', closeAbout);
+  aboutEl.addEventListener('click', function(e){ if (e.target===aboutEl) closeAbout(); });
+
+  // ---------- Language switch ----------
+  var FLAG={
+    en:'<svg viewBox="0 0 60 30" aria-hidden="true"><rect width="60" height="30" fill="#012169"/><path d="M0,0 L60,30 M60,0 L0,30" stroke="#fff" stroke-width="6"/><path d="M0,0 L60,30 M60,0 L0,30" stroke="#C8102E" stroke-width="2.4"/><path d="M30,0 V30 M0,15 H60" stroke="#fff" stroke-width="10"/><path d="M30,0 V30 M0,15 H60" stroke="#C8102E" stroke-width="6"/></svg>',
+    es:'<svg viewBox="0 0 30 20" aria-hidden="true"><rect width="30" height="20" fill="#AA151B"/><rect y="5" width="30" height="10" fill="#F1BF00"/></svg>'};
+  function applyLang(){
+    document.documentElement.lang=LANG;
+    [].forEach.call(document.querySelectorAll('[data-i]'), function(el){ el.innerHTML=tx(el.getAttribute('data-i')); });
+    [].forEach.call(document.querySelectorAll('.langsw button'), function(b){ b.classList.toggle('on', b.getAttribute('data-l')===LANG); });
+    [].forEach.call(document.querySelectorAll('.abt'), function(b){ b.title=tx('abtBtn'); b.setAttribute('aria-label',tx('abtBtn')); });
+    sq.placeholder=tx('place'); rsel.title=tx('choose'); ib.title=tx('icnTip'); ib.setAttribute('aria-label',tx('icnTip')); readLabel(); infoLabel(); setTourBtn();
+    ['roomsel','troom'].forEach(function(id){ var sel=document.getElementById(id); for (var k=0;k<sel.options.length;k++){ var i=+sel.options[k].value; sel.options[k].textContent=roomNo(i)+' · '+rname(ROOMS[i]); } });
+    ROOMS.forEach(function(R){ R.list.forEach(function(it){ if (it.ready) drawLabel(it); }); });
+    if (roomIdx>=0){ if (signMesh){ signMesh.material.map=signTex(ROOMS[roomIdx]); signMesh.material.needsUpdate=true; } cur=null; if (tour) tourSay(); else setStatus(); }
+    if (srch.style.display==='block') renderSearch();
+    if (mus && mus.style.display==='block') renderMus();
+  }
+  function setLang(l){ LANG=l; try{ localStorage.setItem('facepro-lang',l); }catch(e){} applyLang(); }
+  (function(){ var h=document.createElement('span'); h.className='langhost'; roomsEl.appendChild(h); })();
+  [].forEach.call(document.querySelectorAll('.langhost'), function(h){
+    var w=document.createElement('span'); w.className='langsw';
+    ['en','es'].forEach(function(l){ var b=document.createElement('button'); b.type='button'; b.setAttribute('data-l',l); b.setAttribute('aria-label',l==='en'?'English':'Español'); b.innerHTML=FLAG[l]+'<span>'+l.toUpperCase()+'</span>'; b.onclick=function(){ setLang(l); }; w.appendChild(b); });
+    h.appendChild(w);
+  });
+  applyLang();
+
+  // ---------- No double-tap zoom (iPhone) ----------
+  var lastTap=0;
+  document.addEventListener('touchend', function(e){
+    var now=Date.now(); if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName)){ lastTap=0; return; }
+    if (now-lastTap<350 && e.cancelable) e.preventDefault(); lastTap=now;
+  }, {passive:false});
+  ['gesturestart','gesturechange','gestureend'].forEach(function(n){ document.addEventListener(n, function(e){ e.preventDefault(); }); });
+
+  // ---------- Controls ----------
+  var keys={}, yaw=0, pitch=0, nav=null, numBuf='', numT=null;
+  var intro=document.getElementById('intro');
+  document.getElementById('enter').onclick=function(){ unlockSpeech(); intro.style.display='none'; };
+  ['touchend','pointerup','click','keydown'].forEach(function(n){ addEventListener(n, function(e){ if (e.target && e.target.id==='listen') return; unlockSpeech(); }, {passive:true, capture:true}); });
+  addEventListener('keydown', function(e){ if (aboutEl.classList.contains('show')){ if (e.code==='Escape') closeAbout(); return; } if (e.target && e.target.tagName==='INPUT'){ if (e.code==='Escape') closeSearch(); return; } keys[e.code]=true; if (e.code==='KeyE') openLink(); if (e.code==='KeyI') toggleInfo(); if (!tour){ if (e.code==='KeyN') artStep(1); if (e.code==='KeyP') artStep(-1); } if (e.code==='KeyT') toggleTour(); if (e.code==='KeyR') toggleRead();
+    if (tour){ if (e.code==='Space'){ e.preventDefault(); tourPause(); } if (e.code==='KeyN') tourNext(); if (e.code==='KeyP') tourPrev(); if (e.code==='Equal'||e.code==='NumpadAdd') tourSpeed(1); if (e.code==='Minus'||e.code==='NumpadSubtract') tourSpeed(-1); }
+    var m=/^(?:Digit|Numpad)([0-9])$/.exec(e.code); if (m){ clearTimeout(numT); numBuf+=m[1]; if (numBuf.length>2) numBuf=m[1];
+      var go=function(){ var ri=roomAt(+numBuf); numBuf=''; if (ROOMS[ri]){ stopTour(); enterRoom(ri); } };
+      // a single digit that could still become a two-digit room number waits briefly for a second digit
+      if (+numBuf*10>ROOMS.length || numBuf.length===2) go(); else numT=setTimeout(go,650); } });
+  addEventListener('keyup', function(e){ keys[e.code]=false; });
+  // ---------- Idle: start the walk tour after 8 s without input once inside the gallery ----------
+  var lastAct=Date.now(), linkItem=null, lp=null, linked=false, readIt=null, gest=false, idleT=0, pX=0, pZ=0, pYaw=0;
+  // Welcome tour: starts by itself ONLY once, after ENTER, if the visitor does nothing for WELCOME_MS. Any real input (key, tap, drag, wheel) turns it off for the rest of the visit.
+  var welcome=false, WELCOME_MS=20000;
+  addEventListener('mousemove', function(){ lastAct=Date.now(); }, {passive:true, capture:true});
+  ['keydown','mousedown','wheel','touchstart','pointerdown'].forEach(function(n){ addEventListener(n, function(){ lastAct=Date.now(); welcome=false; }, {passive:true, capture:true}); });
+  document.getElementById('enter').addEventListener('click', function(){ lastAct=Date.now(); welcome=true; });   // runs after the capture listeners above, so it re-arms the welcome
+  setInterval(function(){
+    if (!welcome) return;
+    if (AR.busy || tour || linked || rd.busy || intro.style.display!=='none' || srch.style.display==='block' || icn.style.display==='block' || mus.style.display==='block' || aboutEl.classList.contains('show')){ lastAct=Date.now(); return; }
+    if (Date.now()-lastAct>=WELCOME_MS){ welcome=false; startTour(); }
+  }, 500);
+  function hold(id,k){ var b=document.getElementById(id); ['touchstart','mousedown'].forEach(function(ev){ b.addEventListener(ev,function(e){ e.preventDefault(); keys[k]=true; }); });
+    ['touchend','mouseup','mouseleave'].forEach(function(ev){ b.addEventListener(ev,function(){ keys[k]=false; }); }); }
+  ['keydown','pointerdown','wheel','touchstart'].forEach(function(n){ addEventListener(n, function(){ if (intro.style.display==='none') linked=false; }, {passive:true, capture:true}); });
+  ['pointerdown','touchend','click','keydown'].forEach(function(n){ addEventListener(n, function(){ gest=true; }, {passive:true, capture:true}); });   // browsers only allow speech after a tap or key press
+  hold('fw','KeyW'); hold('bk','KeyS');
+  var ray=new THREE.Raycaster();
+  function openLink(){
+    ray.setFromCamera({x:0,y:0},camera);
+    var h=ray.intersectObjects(clickable)[0];
+    var it = h && h.distance<9 ? h.object.userData.item : (cur&&cur.it);
+    if (it && it.link) window.open(it.link,'_blank','noopener');
+  }
+  // ---------- Click / tap navigation ----------
+  // click or tap the floor or a wall: walk that way · a painting: go and stand in front of it · its white title plate: open its link · drag: look around
+  var cvs=renderer.domElement, ptr=null;
+  function aim(e){
+    var r=cvs.getBoundingClientRect();
+    ray.setFromCamera({x:((e.clientX-r.left)/r.width)*2-1, y:-((e.clientY-r.top)/r.height)*2+1}, camera);
+    return roomGroup ? ray.intersectObjects(roomGroup.children,true)[0] : null;
+  }
+  // stand directly in front of a painting, facing it (used for shared links, and again after the room is re-laid out)
+  function placeAt(it){
+    var st=stations.filter(function(q){ return q.it===it; })[0]; if (!st) return false;
+    var side=st.pos.x<0?-1:1, vd=tourDist(); camera.position.set(side*(5.9-vd),1.7,st.pos.z); yaw=side<0?Math.PI/2:-Math.PI/2; pitch=Math.atan(0.65/vd); nav=null;
+    lp={x:camera.position.x, z:camera.position.z, yaw:yaw}; return true;
+  }
+  function goArt(it){
+    var st=stations.filter(function(q){ return q.it===it; })[0]; if (!st) return false;
+    var side=st.pos.x<0?-1:1, vd=tourDist();
+    nav={x:side*(5.9-vd), z:st.pos.z, yaw:side<0?Math.PI/2:-Math.PI/2, pitch:Math.atan(0.65/vd), item:it};
+    linkItem=it; lp={x:nav.x, z:nav.z, yaw:nav.yaw};          // remembered so the target survives a re-layout of the room
+    return true;
+  }
+  function goDir(h){
+    var p=camera.position, dx, dz;
+    if (h){ dx=h.point.x-p.x; dz=h.point.z-p.z; } else { dx=-Math.sin(yaw); dz=-Math.cos(yaw); }
+    var d=Math.hypot(dx,dz);
+    if (d<0.2){ dx=-Math.sin(yaw); dz=-Math.cos(yaw); d=1; }
+    var dist=Math.min(d,9);
+    nav={x:Math.max(-5,Math.min(5,p.x+dx/d*dist)), z:Math.max(-half+1.2,Math.min(half-1.2,p.z+dz/d*dist)), yaw:Math.atan2(-dx,-dz), pitch:0};
+  }
+  function tap(e){
+    var was=!!tour; if (was) stopTour();
+    var h=aim(e), it=h&&h.object.userData.item;
+    if (it){
+      if (h.object.userData.label && it.link && !was){ window.open(it.link,'_blank','noopener'); return; }
+      if (goArt(it)) return;
+    }
+    goDir(h);
+  }
+  cvs.addEventListener('pointerdown', function(e){ ptr={x:e.clientX,y:e.clientY,lx:e.clientX,ly:e.clientY,drag:false}; try{ cvs.setPointerCapture(e.pointerId); }catch(_){} });
+  cvs.addEventListener('pointermove', function(e){
+    if (!ptr){ if (e.pointerType==='mouse'){ var h=aim(e), l=h&&h.object.userData.label&&h.object.userData.item&&h.object.userData.item.link; cvs.style.cursor=l?'pointer':'default'; } return; }
+    if (!ptr.drag && Math.hypot(e.clientX-ptr.x,e.clientY-ptr.y)>8){ ptr.drag=true; if (tour) stopTour(); }
+    if (ptr.drag){ yaw-=(e.clientX-ptr.lx)*.005; pitch=Math.max(-1.2,Math.min(1.2,pitch-(e.clientY-ptr.ly)*.004)); nav=null; }
+    ptr.lx=e.clientX; ptr.ly=e.clientY;
+  });
+  cvs.addEventListener('pointerup', function(e){ var q=ptr; ptr=null; if (q && !q.drag) tap(e); });
+  cvs.addEventListener('pointercancel', function(){ ptr=null; });
+  // ---------- Pinch (two fingers) or mouse wheel zooms the 3D view in and out ----------
+  var pinch=null;
+  function tdist(t){ return Math.hypot(t[0].clientX-t[1].clientX, t[0].clientY-t[1].clientY); }
+  function setFov(f){ camera.fov=Math.max(25,Math.min(95,f)); camera.updateProjectionMatrix(); }
+  cvs.addEventListener('touchstart', function(e){ if (e.touches.length===2){ pinch={d:tdist(e.touches)||1, f:camera.fov}; ptr=null; } }, {passive:true});
+  cvs.addEventListener('touchmove', function(e){ if (pinch && e.touches.length===2){ if (e.cancelable) e.preventDefault(); setFov(pinch.f*pinch.d/(tdist(e.touches)||1)); } }, {passive:false});
+  ['touchend','touchcancel'].forEach(function(n){ cvs.addEventListener(n, function(e){ if (e.touches.length<2) pinch=null; }, {passive:true}); });
+  cvs.addEventListener('wheel', function(e){ e.preventDefault(); setFov(camera.fov+(e.deltaY>0?3:-3)); }, {passive:false});
+  addEventListener('resize', function(){ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+
+  // ---------- Loop ----------
+  var clock=new THREE.Clock();
+  // =====================================================================
+  // AR PREVIEW — "Hang on my wall"
+  // Everything below runs only after the visitor taps the button: no camera, no AR renderer, no extra textures before that.
+  // Three.js (r128) is already loaded by the gallery, so nothing extra is downloaded.
+  // =====================================================================
+  var AR={busy:false,xr:false}, MET_API='https://collectionapi.metmuseum.org/public/collection/v1';
+  try{ if (navigator.xr && navigator.xr.isSessionSupported) navigator.xr.isSessionSupported('immersive-ar').then(function(v){ AR.xr=!!v; },function(){}); }catch(e){}   // cheap capability probe only
+  var ARS={
+    en:{btn:'🖼 Hang on my wall',exit:'✕ Exit',move:'↻ Reposition',set:'📍 Set wall here',prep:'Starting camera…',na:'AR Preview not available for this painting',
+      nocam:'Camera not available. Allow camera access and try again.',nomot:'AR needs camera and motion access on a phone or tablet.',
+      scan:'Move the phone slowly to scan the wall and floor',wall:'Wall found · tap to hang here',floor:'Floor found · tap at the base of the wall',
+      done:'Hung · drag to move · pinch to resize',base:'Stand 1–3 m from the wall. Aim at the line where the wall meets the floor, then tap.',
+      fbdone:'Stay put, turn the phone · drag to move · pinch to resize',est:'estimated size',real:'real size',big:' · larger than most walls',clean:'Clean view',timer:'⏱ 10 s timer',save:'Save / Share',close:'✕ Close',tapshow:'Tap the screen to show the controls',add:'＋ Add another',rem:'🗑 Remove',clr:'Clear all',cancel:'✕ Cancel',pick:'Choose a painting',nopick:'No paintings ready yet. Open a room in the gallery first.',max:'Maximum of 5 paintings on the wall',many:'Tap to select · drag to move · pinch to resize',baseN:'Aim where the painting’s centre should hang, then tap',mine:'📷 My photo (from library)',photo:'My photo',sz0:'All sizes',sz1:'Small · <50 cm',sz2:'Medium · 50–100 cm',sz3:'Large · 1–2 m',sz4:'Huge · >2 m',allr:'All rooms',nosz:'No paintings of this size yet (some sizes are estimates)'},
+    es:{btn:'🖼 Colgar en mi pared',exit:'✕ Salir',move:'↻ Mover de sitio',set:'📍 Fijar pared aquí',prep:'Iniciando cámara…',na:'Vista AR no disponible para este cuadro',
+      nocam:'Cámara no disponible. Permite el acceso a la cámara e inténtalo de nuevo.',nomot:'La RA necesita cámara y sensores de movimiento en un móvil o tableta.',
+      scan:'Mueve el móvil despacio para escanear la pared y el suelo',wall:'Pared detectada · toca para colgar aquí',floor:'Suelo detectado · toca en la base de la pared',
+      done:'Colgado · desliza para mover · pellizca para cambiar el tamaño',base:'Colócate a 1–3 m de la pared. Apunta a la línea donde la pared toca el suelo y toca.',
+      fbdone:'Quédate quieto y gira el móvil · desliza para mover · pellizca para cambiar el tamaño',est:'tamaño estimado',real:'tamaño real',big:' · mayor que la mayoría de paredes',clean:'Vista limpia',timer:'⏱ Temporizador 10 s',save:'Guardar / Compartir',close:'✕ Cerrar',tapshow:'Toca la pantalla para ver los controles',add:'＋ Añadir otro',rem:'🗑 Quitar',clr:'Quitar todos',cancel:'✕ Cancelar',pick:'Elige un cuadro',nopick:'Aún no hay cuadros listos. Abre antes una sala de la galería.',max:'Máximo 5 cuadros en la pared',many:'Toca para seleccionar · desliza para mover · pellizca para cambiar el tamaño',baseN:'Apunta a donde debe colgar el centro del cuadro y toca',mine:'📷 Mi foto (de la galería)',photo:'Mi foto',sz0:'Todos los tamaños',sz1:'Pequeño · <50 cm',sz2:'Mediano · 50–100 cm',sz3:'Grande · 1–2 m',sz4:'Enorme · >2 m',allr:'Todas las salas',nosz:'Aún no hay cuadros de este tamaño (algunos tamaños son estimados)'}};
+  function at(k){ return ARS[LANG][k]; }
+
+  // ---- real sizes (cm) of well-known works: key = normalised title | artist surname. Only the LONG side is used; the other side follows the image ----
+  var AR_DIMS={'mona lisa|vinci':[53,77],'starry night|gogh':[92,74],'sunflowers|gogh':[73,92],'cafe terrace at night|gogh':[65.5,81],'scream|munch':[91,73.5],'kiss|klimt':[180,180],
+    'las meninas|velazquez':[276,318],'surrender of breda|velazquez':[370.5,307.5],'rokeby venus|velazquez':[177,122.5],'guernica|picasso':[776,349],'demoiselles d avignon|picasso':[233.7,243.9],
+    'great wave off kanagawa|hokusai':[37.9,25.7],'girl with a pearl earring|vermeer':[39,44.5],'view of delft|vermeer':[117.5,96.5],'milkmaid|vermeer':[41,45.5],'night watch|rembrandt':[437,363],
+    'birth of venus|botticelli':[278.9,172.5],'primavera|botticelli':[314,203],'last supper|vinci':[880,460],'lady with an ermine|vinci':[39,54],'salvator mundi|vinci':[45.4,65.6],'joueurs de cartes|cezanne':[130,97],'nafea faa ipoipo|gauguin':[77,101],'wasserschlangen ii|klimt':[145,80],'elisabeth lederer|klimt':[110,160],'marten soolmans|rembrandt':[132.5,207.5],'oopjen coppit|rembrandt':[132.5,207.5],'nu couche|modigliani':[92,60],'nu couche sur le cote gauche|modigliani':[146.7,89.4],'poseuses|seurat':[50,39],'adele bloch bauer ii|klimt':[120,190],'irises|gogh':[93,71.1],'scream 1895|munch':[59,79],'blumenwiese|klimt':[110,110],'waldabhang in unterach|klimt':[110,110],'bauerngarten|klimt':[110,110],'young man holding a roundel|botticelli':[39.4,58.4],'halberdier|pontormo':[72.4,92],'massacre of the innocents|rubens':[182,142],'birch forest|klimt':[110,110],'portrait of dr gachet|gogh':[56,67],'bassin aux nympheas 1919|monet':[200,100],'creation of adam|michelangelo':[570,280],
+    'persistence of memory|dali':[33,24],'american gothic|wood':[65.3,78],'nighthawks|hopper':[152.4,84.1],'early sunday morning|hopper':[153,89.4],'liberty leading the people|delacroix':[325,260],
+    'raft of the medusa|gericault':[716,491],'wanderer above the sea of fog|friedrich':[74.8,94.8],'third of may 1808|goya':[347,268],'saturn devouring his son|goya':[81,143.5],
+    'grande jatte|seurat':[308,207.6],'impression sunrise|monet':[63,48],'luncheon of the boating party|renoir':[173,129.5],'olympia|manet':[190,130.5],'dejeuner sur l herbe|manet':[264.5,208],
+    'arrangement in grey and black|whistler':[162.5,144.3],'hay wain|constable':[185.4,130.2],'venus of urbino|titian':[165,119],'arnolfini portrait|eyck':[60,82.2],'garden of earthly delights|bosch':[386,220],
+    'ophelia|millais':[111.8,76.2],'lady of shalott|waterhouse':[200,153],'christina s world|wyeth':[121.3,81.9],'sleeping gypsy|rousseau':[200.7,129.5],'dance|matisse':[391,260],'two fridas|kahlo':[173,173],
+    'burial of the count of orgaz|greco':[360,480],'laughing cavalier|hals':[67.3,83],'swing|fragonard':[64.2,81],'judith beheading holofernes|caravaggio':[195,145],'calling of saint matthew|caravaggio':[340,322],
+    'pilgrimage to cythera|watteau':[194,129],'death of marat|david':[128,165],'oath of the horatii|david':[425,330],'grande odalisque|ingres':[162,91],'fighting temeraire|turner':[121.6,90.7],
+    'gleaners|millet':[111,83.8],'burial at ornans|courbet':[668,315],'self portrait at twenty eight|durer':[48.9,67.1],'ambassadors|holbein':[209.5,207],'hunters in the snow|bruegel':[162,117],
+    'sistine madonna|raphael':[196,265],'wedding at cana|veronese':[994,677],'marilyn diptych|warhol':[289,205],'composition with red blue and yellow|mondrian':[69,72.5],'school of athens|raphael':[770,500],
+    'birth of venus|cabanel':[225,130]};
+  var AR_ROOM_LONG={'Ukiyo-e':38,'Persian & Mughal Miniatures':24};          // typical long side (cm) when nothing better is known
+  function arTO(ms){ return new Promise(function(_,rej){ setTimeout(function(){ rej(0); },ms); }); }
+  function arCmFrom(txt){ var m=(txt||'').match(/([\d]+(?:[.,]\d+)?)\s*[×x]\s*([\d]+(?:[.,]\d+)?)\s*cm/i); return m? Math.max(parseFloat(m[1].replace(',','.')),parseFloat(m[2].replace(',','.'))) : 0; }
+  // → Promise<{L: long side in metres, real: bool}>   order: table → museum API (AIC / Met) → size written in the Commons file name → default
+  function arSize(it){
+    var k=norm(it.qt).replace(/^(the|la|le|les|el) /,'')+'|'+norm(surname(it.artist)), t=AR_DIMS[k], l=it.link||'', m, u=null, c=PINNED[it.t]||cache[it.t]||{};
+    if (t) return Promise.resolve({L:Math.max(t[0],t[1])/100,real:true});
+    var dflt={L:(AR_ROOM_LONG[it.room.name]||80)/100,real:false};
+    var nm=arCmFrom(decodeURIComponent(l+' '+(c.url||'')));
+    if (nm) return Promise.resolve({L:nm/100,real:true});
+    if ((m=l.match(/artic\.edu\/artworks\/(\d+)/))) u='https://api.artic.edu/api/v1/artworks/'+m[1]+'?fields=dimensions_detail,dimensions';
+    else if ((m=l.match(/metmuseum\.org\/art\/collection\/search\/(\d+)/))) u=MET_API+'/objects/'+m[1];
+    if (!u) return Promise.resolve(dflt);
+    return Promise.race([fetch(u).then(function(r){ return r.json(); }),arTO(3000)]).then(function(d){
+      var L=0, x;
+      if (d.data){ x=(d.data.dimensions_detail||[]).filter(function(q){ return q.width&&q.height; })[0]; L=x?Math.max(x.width,x.height):arCmFrom(d.data.dimensions); }
+      else { x=(d.measurements||[]).filter(function(q){ return q.elementMeasurements&&q.elementMeasurements.Height&&q.elementMeasurements.Width; }).sort(function(a,b){ return (b.elementName==='Overall')-(a.elementName==='Overall'); })[0];
+        L=x?Math.max(x.elementMeasurements.Height,x.elementMeasurements.Width):arCmFrom(d.dimensions); }
+      return L>2&&L<2000 ? {L:L/100,real:true} : dflt;
+    }).catch(function(){ return dflt; });
+  }
+
+  // ---- image: reuse the picture the gallery already loaded (crossOrigin='anonymous' → CORS already proven); otherwise load it the same way ----
+  function arLoad(url){ return new Promise(function(res,rej){ new THREE.TextureLoader().setCrossOrigin('anonymous').load(url,function(t){ res(t.image); },undefined,function(){ rej(0); }); }); }
+  function arTainted(img){ try{ var c=document.createElement('canvas'); c.width=c.height=1; var x=c.getContext('2d'); x.drawImage(img,0,0,1,1); x.getImageData(0,0,1,1); return false; }catch(e){ return true; } }
+  // Resolves {img,w,h,real} (metres) or rejects → friendly "AR Preview not available" message (typical for an Internet Archive host without CORS headers)
+  function arPrepare(it){
+    var src=it.tex&&it.tex.image&&it.tex.image.width ? Promise.resolve(it.tex.image) : (function(){ var c=pinCand(PINNED[it.t]||cache[it.t]); if (!c) return Promise.reject(0);
+      return arLoad(c.url).catch(function(){ return c.alt? arLoad(c.alt) : Promise.reject(0); }); })();
+    return src.then(function(img){
+      if (arTainted(img)) throw 0;
+      return arSize(it).then(function(s){ var a=img.width/img.height, w=a>=1?s.L:s.L*a, h=a>=1?s.L/a:s.L; return {img:img,w:w,h:h,real:s.real}; });
+    });
+  }
+
+  // ---- the framed painting (metres; origin = centre of the picture; faces +Z; back of the frame at z=0 = the wall) ----
+  function arBuild(a){
+    var g=new THREE.Group(), w=a.w, h=a.h, f=Math.max(.02,Math.min(.045,.012+Math.min(w,h)*.03)), tex=new THREE.Texture(a.img);
+    tex.encoding=THREE.sRGBEncoding; tex.minFilter=THREE.LinearFilter; tex.generateMipmaps=false; tex.anisotropy=4; tex.needsUpdate=true;
+    var art=new THREE.Mesh(new THREE.PlaneGeometry(w,h),new THREE.MeshBasicMaterial({map:tex})); art.position.z=0.02; g.add(art);
+    var fm=new THREE.MeshStandardMaterial({color:0xa07f3a,roughness:.4,metalness:.45}), lm=new THREE.MeshBasicMaterial({color:0x2b1d0b}), l=Math.max(.006,f*.28);
+    [[w+2*f,f,0,(h+f)/2],[w+2*f,f,0,-(h+f)/2],[f,h,(w+f)/2,0],[f,h,-(w+f)/2,0]].forEach(function(s){ var m=new THREE.Mesh(new THREE.BoxGeometry(s[0],s[1],0.04),fm); m.position.set(s[2],s[3],0.02); g.add(m); });
+    [[w,l,0,(h-l)/2],[w,l,0,-(h-l)/2],[l,h,(w-l)/2,0],[l,h,-(w-l)/2,0]].forEach(function(s){ var m=new THREE.Mesh(new THREE.PlaneGeometry(s[0],s[1]),lm); m.position.set(s[2],s[3],0.0215); g.add(m); });   // thin dark liner = depth
+    // soft contact shadow on the wall (canvas-blurred rectangle; shadowOffset trick because ctx.filter is missing on Safari)
+    var pad=Math.max(0.3,Math.min(w,h)*0.22), cw=256, ch=Math.max(32,Math.min(1024,Math.round(256*(h+2*pad)/(w+2*pad)))), sx=cw/(w+2*pad), c=document.createElement('canvas'); c.width=cw; c.height=ch;
+    var x=c.getContext('2d'); x.shadowOffsetX=cw*3;
+    [[.5,.14,.3],[.16,.03,.6]].forEach(function(L){ x.shadowColor='rgba(0,0,0,'+L[2]+')'; x.shadowBlur=pad*L[0]*sx; x.shadowOffsetY=pad*L[1]*sx; x.fillRect((pad-f)*sx-cw*3,(pad-f)*sx,(w+2*f)*sx,(h+2*f)*sx); });   // [blur, drop, opacity]: soft ambient + tight contact
+    var sh=new THREE.Mesh(new THREE.PlaneGeometry(w+2*pad,h+2*pad),new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(c),transparent:true,depthWrite:false})); sh.position.z=0.003; sh.userData.t=true; g.add(sh);
+    var hl=new THREE.Mesh(new THREE.PlaneGeometry(w+2*f+.05,h+2*f+.05),new THREE.MeshBasicMaterial({color:0xf5ba06})); hl.position.z=0.005; hl.visible=false; g.add(hl); g.userData.hl=hl;      // gold outline = selected painting
+    var hit=new THREE.Mesh(new THREE.PlaneGeometry(w+2*f+.1,h+2*f+.1),new THREE.MeshBasicMaterial({visible:false,side:THREE.DoubleSide})); hit.position.z=0.05; g.add(hit); g.userData.hit=hit;   // generous tap target
+    g.userData.fade=function(o){ g.traverse(function(m){ if (m.material){ m.material.transparent=o<1||!!m.userData.t; m.material.opacity=o; m.material.needsUpdate=true; } }); };
+    return g;
+  }
+  function arLights(s){ s.add(new THREE.HemisphereLight(0xffffff,0x887766,1.1)); var d=new THREE.DirectionalLight(0xffffff,.6); d.position.set(.5,2,1.5); s.add(d); }
+  function arFreeScene(s){ if (!s) return; s.traverse(function(o){ if (o.geometry) o.geometry.dispose(); if (o.material){ if (o.material.map) o.material.map.dispose(); o.material.dispose(); } }); }
+
+  // ---- overlay UI (created on first use; works as the WebXR DOM-overlay root and as the camera-fallback screen) ----
+  function arUI(mode){
+    var o=AR.ov;
+    if (!o){
+      o=AR.ov=document.createElement('div'); o.id='arov';
+      o.innerHTML='<video id="arvid" playsinline muted autoplay></video><canvas id="arcv"></canvas><div id="arx"></div>'+
+        '<div id="artop"><div id="arttl"></div><button class="arb" id="arexit"></button></div><div id="arhint"></div>'+
+        '<div id="arbot"><div id="ardrow" class="c"><button class="arb" id="arminus">−</button><span id="ardist"></span><button class="arb" id="arplus">+</button></div>'+
+        '<button class="arb c" id="armove"></button><button class="arb c" id="arrem"></button><button class="arb c" id="aradd"></button><button class="arb c" id="arclr"></button><button class="arb c" id="arcancel"></button><button class="arb c" id="arclean">👁</button><button class="arb c" id="arset"></button></div>'+
+        '<div id="arcam"><button id="artimer"></button><button id="arshutter" aria-label="Photo"></button></div><div id="arcount"></div><div id="arflash"></div>'+
+        '<div id="arshot"><img alt=""><div><button class="arb" id="arsave"></button><button class="arb" id="arclose"></button></div></div>'+
+        '<div id="arpick"><div class="pt"><b id="arpt"></b><button class="arb" id="arpx">✕</button></div><button class="arb" id="arpm"></button><input type="file" id="arpf" accept="image/*" style="display:none"><select id="arpr"></select><div id="arpz"></div><div id="arpl"></div></div>';
+      document.body.appendChild(o);
+      var q=function(s){ return o.querySelector(s); };
+      ['#artop','#arbot','#arhint','#arpick'].forEach(function(s){ q(s).addEventListener('beforexrselect',function(e){ e.preventDefault(); }); });   // taps on buttons must not "place" the painting
+      q('#arexit').onclick=arExit;
+      q('#armove').onclick=function(e){ e.stopPropagation(); arMove(); };
+      q('#aradd').onclick=function(e){ e.stopPropagation(); if (AR.adding||AR.E) return; if (AR.list.length>=AR_MAX){ arToast(at('max')); return; } arPickerOpen(false); };
+      q('#arrem').onclick=function(e){ e.stopPropagation(); arRemove(); };
+      q('#arclr').onclick=function(e){ e.stopPropagation(); arClear(); };
+      q('#arpm').onclick=function(e){ e.stopPropagation(); q('#arpf').click(); };
+      q('#arpf').onchange=function(){ var f=this.files&&this.files[0]; this.value=''; if (f) arAddFile(f); };
+      q('#arcancel').onclick=function(e){ e.stopPropagation(); arCancel(); };
+      q('#arpx').onclick=function(e){ e.stopPropagation(); if (AR.pickReq && !AR.list.length && !AR.E) arExit(); else q('#arpick').style.display='none'; };
+      q('#arset').onclick=arSetWall;
+      // clean view: hide every button (camera + painting only); a tap anywhere brings the controls back
+      q('#arclean').onclick=function(e){ e.stopPropagation(); o.classList.add('clean'); arToast(at('tapshow')); };
+      o.addEventListener('click',function(e){
+        var t=e.target, inside=function(sel){ return t.closest && t.closest(sel); };
+        if (inside('#arcam,#arshot,#arpick')) return;
+        if (o.classList.contains('clean') && !(AR.cd||AR.shot)){ o.classList.remove('clean'); return; }
+        if (AR.state==='placed' && AR.c3 && !inside('button')) arPickScreen(e.clientX,e.clientY);       // camera fallback: tap a painting to select it
+      });
+      var tOff=function(t){ return t.closest && t.closest('button,#arpick,#arshot,#arcam'); };
+      o.addEventListener('touchstart',function(e){
+        if (AR.state!=='placed'||AR.E||!AR.list.length||o.classList.contains('clean')||tOff(e.target)) return;
+        if (e.touches.length===2){ var a=e.touches[0], b=e.touches[1]; AR.dg=null; AR.dr=null;
+          if (AR.c3) arPickScreen((a.clientX+b.clientX)/2,(a.clientY+b.clientY)/2);       // pinch the painting under the fingers (or the selected one)
+          var sl=AR.sel||AR.list[AR.list.length-1]; if (sl!==AR.sel) arSelect(sl);
+          AR.pz={e:sl,d:Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY)||1,k:sl.k}; return; }
+        if (e.touches.length===1 && AR.c3 && !AR.pz) arDragStart(e.touches[0]);
+      },{passive:true});
+      o.addEventListener('touchmove',function(e){
+        if (AR.pz && e.touches.length===2){ e.preventDefault(); var a=e.touches[0], b=e.touches[1];
+          arSetK(AR.pz.e,Math.max(.25,Math.min(4,AR.pz.k*(Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY)||1)/AR.pz.d))); return; }
+        if (AR.dg && e.touches.length===1){ var t=e.touches[0]; if (!AR.dg.mv && Math.hypot(t.clientX-AR.dg.x,t.clientY-AR.dg.y)<8) return; AR.dg.mv=true; e.preventDefault(); arDragMove(t); }
+      },{passive:false});
+      ['touchend','touchcancel'].forEach(function(n){ o.addEventListener(n,function(e){ if (e.touches.length<2) AR.pz=null; if (!e.touches.length) AR.dg=null; },{passive:true}); });
+      q('#arshutter').onclick=function(e){ e.stopPropagation(); AR.snap=true; };
+      q('#artimer').onclick=function(e){ e.stopPropagation(); arTimer(); };
+      q('#arsave').onclick=arSave; q('#arclose').onclick=function(){ arShotClose(); };
+      q('#arminus').onclick=function(){ arNudge(-.1); }; q('#arplus').onclick=function(){ arNudge(.1); };
+    }
+    o.querySelector('#arexit').textContent=at('exit'); o.querySelector('#armove').textContent=at('move'); o.querySelector('#arset').textContent=at('set'); o.querySelector('#artimer').textContent=at('timer'); o.querySelector('#arsave').textContent=at('save'); o.querySelector('#arclose').textContent=at('close'); o.querySelector('#arclean').title=at('clean');
+    o.querySelector('#aradd').textContent=at('add'); o.querySelector('#arrem').textContent=at('rem'); o.querySelector('#arclr').textContent=at('clr'); o.querySelector('#arcancel').textContent=at('cancel'); o.querySelector('#arpt').textContent=at('pick'); o.querySelector('#arpm').textContent=at('mine'); o.querySelector('#arpick').style.display='none';
+    o.querySelector('#arttl').textContent=''; o.className='m-'+mode+' s-pre'; o.style.display='block'; arHint(at('prep'));
+    return o;
+  }
+  function arHint(t){ if (AR.ov && AR.hintTxt!==t){ AR.hintTxt=t; AR.ov.querySelector('#arhint').textContent=t; } }
+  function arState(){ var s=AR.state; if (s!=='placed') AR.ov.classList.remove('clean'); clearTimeout(AR.ht); AR.ov.classList.remove('hh'); if (s==='placed') AR.ht=setTimeout(function(){ if (AR.ov) AR.ov.classList.add('hh'); },4500); AR.ov.className=AR.ov.className.replace(/\bs-\w+/,'s-'+s);
+    AR.ov.classList.toggle('canc',!!AR.E&&(AR.list.length>0||!!AR.E.old)); AR.ov.classList.toggle('multi',AR.list.length>1);
+    arHint(s==='base'?'':at(s==='placed'?(AR.list.length>1?'many':(AR.sess?'done':'fbdone')):'scan')); }
+  function arToast(m){ var t=AR.toast; if (!t){ t=AR.toast=document.createElement('div'); t.className='artoast'; document.body.appendChild(t); } t.textContent=m; t.style.display='block'; clearTimeout(AR.tt); AR.tt=setTimeout(function(){ t.style.display='none'; },4500); }
+  function arFail(e){ var s=(e==='cam')?at('nocam'):(e==='motion')?at('nomot'):(typeof e==='string'?e:at('na')); arCleanup(); arToast(s); }
+  function arTitle(){ var e=AR.E||AR.sel, t=AR.ov&&AR.ov.querySelector('#arttl'); if (!t) return; if (!e){ t.textContent=''; return; }
+    var a=e.a, n=AR.list.length+(AR.E?1:0);
+    t.textContent=e.it.title.replace(/\s*\(.*\)/,'')+' · '+(a.real&&e.k===1?'':'≈ ')+Math.round(a.w*e.k*100)+' × '+Math.round(a.h*e.k*100)+' cm'+(n>1?' · '+n+'/'+AR_MAX:''); }
+
+  // composite = camera video (cropped like object-fit:cover) + the painting canvas, then preview with Save / Share
+  function arCompose(){
+    var cv=AR.r.domElement, v=AR.ov.querySelector('#arvid'), w=cv.width, h=cv.height, c=document.createElement('canvas'), x, vw=v.videoWidth, vh=v.videoHeight;
+    c.width=w; c.height=h; x=c.getContext('2d');
+    if (vw){ var k=Math.max(w/vw,h/vh); x.drawImage(v,(w-vw*k)/2,(h-vh*k)/2,vw*k,vh*k); }
+    x.drawImage(cv,0,0);
+    var f=AR.ov.querySelector('#arflash'); f.style.opacity=1; setTimeout(function(){ f.style.opacity=0; },120);
+    c.toBlob(function(b){ if (!b){ arToast(at('na')); return; } var u=URL.createObjectURL(b), s=AR.ov.querySelector('#arshot'); AR.shot={blob:b,url:u}; s.querySelector('img').src=u; s.style.display='flex'; },'image/jpeg',.92);
+  }
+  function arTimer(){      // selfie / group photo: prop the phone up, press, step in front of the painting
+    var cnt=AR.ov.querySelector('#arcount'), n=10;
+    if (AR.cd){ clearInterval(AR.cd); AR.cd=0; cnt.style.display='none'; return; }
+    cnt.textContent=n; cnt.style.display='block';
+    AR.cd=setInterval(function(){ n--; if (n<=0){ clearInterval(AR.cd); AR.cd=0; cnt.style.display='none'; AR.snap=true; } else cnt.textContent=n; },1000);
+  }
+  function arSave(){
+    var b=AR.shot&&AR.shot.blob; if (!b) return; var f=new File([b],'facepro.jpg',{type:'image/jpeg'});
+    if (navigator.canShare && navigator.canShare({files:[f]})) navigator.share({files:[f]}).catch(function(){});   // share sheet → Save Image, WhatsApp…
+    else { var a=document.createElement('a'); a.href=AR.shot.url; a.download='facepro.jpg'; document.body.appendChild(a); a.click(); a.remove(); }
+  }
+  function arShotClose(){ if (AR.shot){ URL.revokeObjectURL(AR.shot.url); AR.shot=null; } AR.ov.querySelector('#arshot').style.display='none'; }
+  function arOpen(it){ if (AR.busy) return; AR.busy=true; AR.it=it; AR.list=[]; AR.E=null; AR.sel=null; hush(); if (AR.xr) arStartXR(it); else arStartCam(it); }
+  function arCleanup(){
+    if (AR.raf) cancelAnimationFrame(AR.raf);
+    if (AR.r){ try{ AR.r.setAnimationLoop(null); }catch(e){} arFreeScene(AR.scene); try{ AR.r.dispose(); AR.r.forceContextLoss(); }catch(e){} }
+    if (AR.stream) AR.stream.getTracks().forEach(function(t){ t.stop(); });
+    if (AR.onOri) removeEventListener('deviceorientation',AR.onOri); if (AR.onRes) removeEventListener('resize',AR.onRes);
+    if (AR.ov){ AR.ov.style.display='none'; var v=AR.ov.querySelector('#arvid'); v.srcObject=null; AR.ov.querySelector('#arshot').style.display='none'; AR.ov.querySelector('#arcount').style.display='none'; AR.ov.querySelector('#arpick').style.display='none'; if (AR.shot) URL.revokeObjectURL(AR.shot.url); }
+    if (AR.cd) clearInterval(AR.cd); clearTimeout(AR.ht);
+    AR={busy:false,xr:AR.xr,ov:AR.ov,toast:AR.toast}; lastAct=Date.now();
+  }
+
+
+  // ======================= Multiple paintings on the wall =======================
+  var AR_MAX=5;
+  function arEntry(it,a){ var P=arBuild(a); if (AR.sess) P.matrixAutoUpdate=false; return {it:it,a:a,h:a.h,P:P,anc:null,rel:null,fb:null,old:null,dead:false,k:1}; }
+  function arExit(){ if (AR.sess) AR.sess.end(); else arCleanup(); }
+  // the gold outline marks the selected painting only for a moment (2.5 s) after it is added or tapped, so the wall can be seen clean
+  function arSelect(e){ AR.sel=e||null; var m=AR.list.length>1; AR.list.forEach(function(x){ x.P.userData.hl.visible=m&&x===e; }); arTitle(); arDist();
+    clearTimeout(AR.hlT); if (m&&e){ var L=AR.list; AR.hlT=setTimeout(function(){ L.forEach(function(x){ x.P.userData.hl.visible=false; }); },2500); } }
+  function arDrop(e){ e.dead=true; try{ AR.scene.remove(e.P); }catch(x){} arFreeScene(e.P); if (e.anc&&e.anc.delete){ try{ e.anc.delete(); }catch(x){} } e.anc=null; }
+  function arCommit(E){          // the painting being placed is now hung on the wall
+    if (E.old){ if (E.old.anc&&E.old.anc.delete){ try{ E.old.anc.delete(); }catch(x){} } E.old=null; }
+    AR.E=null; AR.list.push(E); AR.state='placed'; E.P.visible=true; E.P.userData.fade(1); if (AR.ret) AR.ret.visible=false;
+    arSelect(E); arState();
+  }
+  function arMove(){
+    var e=AR.sel, i=AR.list.indexOf(e); if (!e||i<0||AR.E) return;
+    AR.list.splice(i,1); AR.E=e; e.old={m:AR.sess?e.P.matrix.clone():null,anc:e.anc,rel:e.rel,fb:e.fb}; e.anc=null;
+    arSelect(null);
+    if (AR.sess){ AR.state='aim'; e.P.userData.fade(.55); } else { AR.state='base'; e.P.visible=false; }
+    arState();
+  }
+  function arCancel(){
+    var E=AR.E; if (!E) return;
+    if (E.old){ var o=E.old; E.anc=o.anc; E.rel=o.rel; E.fb=o.fb; E.old=null; AR.E=null; AR.list.push(E); E.P.visible=true; E.P.userData.fade(1);
+      if (o.m){ E.P.matrix.copy(o.m); E.P.matrixWorldNeedsUpdate=true; } if (E.fb) arLay(E); }
+    else { AR.E=null; arDrop(E); }
+    if (AR.ret) AR.ret.visible=false;
+    AR.state='placed'; arSelect(AR.list[AR.list.length-1]); arState();
+  }
+  function arRemove(){
+    var e=AR.sel, i=AR.list.indexOf(e); if (!e||i<0||AR.E) return;
+    AR.list.splice(i,1); arDrop(e);
+    arSelect(AR.list.length?AR.list[Math.min(i,AR.list.length-1)]:null); arState();
+    if (!AR.list.length) arPickerOpen(true);
+  }
+  function arClear(){ if (AR.E) return; AR.list.slice().forEach(arDrop); AR.list=[]; arSelect(null); arState(); arPickerOpen(true); }
+  // tap-to-select
+  function arPickRay(rc){
+    var best=null, bd=1e9;
+    AR.list.forEach(function(e){ e.P.updateMatrixWorld(true); var h=rc.intersectObject(e.P.userData.hit,false)[0]; if (h&&h.distance<bd){ bd=h.distance; best=e; } });
+    if (best&&best!==AR.sel) arSelect(best);
+  }
+  function arRayAt(x,y){ var r=AR.r.domElement.getBoundingClientRect(), rc=AR.rc||(AR.rc=new THREE.Raycaster());
+    rc.setFromCamera({x:(x-r.left)/r.width*2-1,y:-((y-r.top)/r.height)*2+1},AR.c3); return rc; }
+  function arPickScreen(x,y){ arPickRay(arRayAt(x,y)); }
+  // ---- drag to move / pinch to resize the selected painting ----
+  function arSetK(e,k){ if (AR.sess){ var r=k/e.k; e.P.matrix.scale(new THREE.Vector3(r,r,r)); e.P.matrixWorldNeedsUpdate=true; } else e.P.scale.setScalar(k); e.k=k; arTitle(); }
+  function arPlaneHit(e,rc){       // camera fallback: where the finger ray meets the painting's own wall plane
+    var f=e.fb, n=new THREE.Vector3(Math.sin(f.yaw),0,Math.cos(f.yaw)), c=new THREE.Vector3(f.x,f.y,f.z), dn=n.dot(rc.ray.direction); if (Math.abs(dn)<.05) return null;
+    var t=n.dot(c.clone().sub(rc.ray.origin))/dn; if (t<.2||t>20) return null; return rc.ray.origin.clone().add(rc.ray.direction.clone().multiplyScalar(t));
+  }
+  function arDragStart(t){
+    var rc=arRayAt(t.clientX,t.clientY), best=null, bd=1e9;
+    AR.list.forEach(function(e){ e.P.updateMatrixWorld(true); var h=rc.intersectObject(e.P.userData.hit,false)[0]; if (h&&h.distance<bd){ bd=h.distance; best=e; } });
+    if (!best||!best.fb) return; if (best!==AR.sel) arSelect(best);
+    var hp=arPlaneHit(best,rc); if (!hp) return;
+    AR.dg={e:best,x:t.clientX,y:t.clientY,mv:false,off:hp.sub(new THREE.Vector3(best.fb.x,best.fb.y,best.fb.z))};
+  }
+  function arDragMove(t){
+    var d=AR.dg, hp=arPlaneHit(d.e,arRayAt(t.clientX,t.clientY)); if (!hp) return; hp.sub(d.off);
+    d.e.fb.x=hp.x; d.e.fb.y=Math.max(.2,Math.min(3.2,hp.y)); d.e.fb.z=hp.z; arLay(d.e);
+  }
+  function arXRDragStart(ev){      // Android: the finger ray comes from the XR input source
+    try{ var po=ev.frame.getPose(ev.inputSource.targetRaySpace,AR.r.xr.getReferenceSpace()); if (!po) return;
+      var m=po.transform.matrix, rc=AR.rc||(AR.rc=new THREE.Raycaster()), best=null, bd=1e9;
+      rc.ray.origin.set(m[12],m[13],m[14]); rc.ray.direction.set(-m[8],-m[9],-m[10]).normalize();
+      AR.list.forEach(function(e){ e.P.updateMatrixWorld(true); var h=rc.intersectObject(e.P.userData.hit,false)[0]; if (h&&h.distance<bd){ bd=h.distance; best=e; } });
+      if (!best) return; if (best!==AR.sel) arSelect(best);
+      var pm=best.P.matrix.elements, n=new THREE.Vector3(pm[8],pm[9],pm[10]).normalize(), c=new THREE.Vector3(pm[12],pm[13],pm[14]), dn=n.dot(rc.ray.direction); if (Math.abs(dn)<.05) return;
+      var t=n.dot(c.clone().sub(rc.ray.origin))/dn; AR.dr={e:best,src:ev.inputSource,mv:false,off:rc.ray.origin.clone().add(rc.ray.direction.clone().multiplyScalar(t)).sub(c)}; }catch(x){}
+  }
+  function arXRDrag(frame,ref){    // every frame while a finger drags a painting
+    var d=AR.dr, po=frame.getPose(d.src.targetRaySpace,ref); if (!po) return;
+    var m=po.transform.matrix, o=new THREE.Vector3(m[12],m[13],m[14]), dir=new THREE.Vector3(-m[8],-m[9],-m[10]).normalize(), pm=d.e.P.matrix.elements,
+        n=new THREE.Vector3(pm[8],pm[9],pm[10]).normalize(), c=new THREE.Vector3(pm[12],pm[13],pm[14]), dn=n.dot(dir); if (Math.abs(dn)<.05) return;
+    var t=n.dot(c.clone().sub(o))/dn; if (t<.1||t>20) return;
+    var hp=o.add(dir.multiplyScalar(t)).sub(d.off);
+    if (!d.mv && hp.distanceTo(c)>.03){ d.mv=true; if (d.e.anc){ try{ d.e.anc.delete(); }catch(x){} d.e.anc=null; } }
+    if (d.mv){ d.e.P.matrix.setPosition(hp); d.e.P.matrixWorldNeedsUpdate=true; }
+  }
+  function arXRDragEnd(ev){
+    var d=AR.dr; AR.dr=null; if (!d||!d.mv) return;
+    try{ var pos=new THREE.Vector3(), q=new THREE.Quaternion(), sc=new THREE.Vector3(); d.e.P.matrix.decompose(pos,q,sc);
+      ev.frame.createAnchor(new XRRigidTransform({x:pos.x,y:pos.y,z:pos.z,w:1},{x:q.x,y:q.y,z:q.z,w:q.w}),AR.r.xr.getReferenceSpace()).then(function(an){
+        if (d.e.dead||AR.list.indexOf(d.e)<0||(AR.dr&&AR.dr.e===d.e)){ try{ an.delete(); }catch(x){} return; } d.e.anc=an; d.e.rel=new THREE.Matrix4(); }).catch(function(){}); }catch(x){}   // re-anchor where it was dropped
+  }
+  function arPickXR(ev){
+    try{ var po=ev.frame.getPose(ev.inputSource.targetRaySpace,AR.r.xr.getReferenceSpace()); if (!po) return;
+      var m=po.transform.matrix, rc=AR.rc||(AR.rc=new THREE.Raycaster());
+      rc.ray.origin.set(m[12],m[13],m[14]); rc.ray.direction.set(-m[8],-m[9],-m[10]).normalize(); arPickRay(rc); }catch(e){}
+  }
+  // simple painting selector (paintings whose image is already known: loaded in the gallery or cached)
+  function arEligible(it){ return !it.emb && !it.anon && !it.failed && !/Sculpture/.test(it.room.name) && !!((it.tex&&it.tex.image&&it.tex.image.width)||pinCand(PINNED[it.t]||cache[it.t])); }
+  function arPickerOpen(req){
+    var pk=AR.ov.querySelector('#arpick'), sel=pk.querySelector('#arpr'), zb=pk.querySelector('#arpz'), rooms=ROOMS.filter(function(R){ return R.list.some(arEligible); });
+    AR.pickReq=!!req; AR.szf=0; pk.querySelector('#arpt').textContent=at('pick'); sel.innerHTML='';
+    var oa=document.createElement('option'); oa.value='all'; oa.textContent=at('allr'); sel.appendChild(oa);
+    rooms.forEach(function(R){ var o=document.createElement('option'); o.value=ROOMS.indexOf(R); o.textContent=rname(R); sel.appendChild(o); });
+    var base=ROOMS.indexOf((AR.sel&&AR.sel.it.room)||ROOMS[roomIdx]); sel.value=rooms.indexOf(ROOMS[base])>=0?String(base):'all';
+    sel.style.display=rooms.length?'block':'none'; sel.onchange=arPickFill;
+    zb.innerHTML=''; zb.style.display=rooms.length?'flex':'none';
+    [0,1,2,3,4].forEach(function(k){ var b=document.createElement('button'); b.textContent=at('sz'+k); b.className=k===AR.szf?'on':''; b.onclick=function(e){ e.stopPropagation(); AR.szf=k;
+      [].forEach.call(zb.children,function(c,n){ c.className=n===k?'on':''; }); if (k) sel.value='all';      // a size choice previews every room
+      arPickFill(); if (k) arRefine(); }; zb.appendChild(b); });
+    arPickFill(); pk.style.display='flex';
+  }
+  // ---- size (long side, metres) known synchronously: table of famous works → size in the file name → earlier museum lookup → room default (estimate) ----
+  function arSizeNow(it){
+    if (it._arL) return it._arL;
+    var c=PINNED[it.t]||cache[it.t]||{}, k=norm(it.qt).replace(/^(the|la|le|les|el) /,'')+'|'+norm(surname(it.artist)), t=AR_DIMS[k], nm;
+    if (t) return it._arL={L:Math.max(t[0],t[1])/100,real:true};
+    nm=arCmFrom(decodeURIComponent((it.link||c.link||'')+' '+(c.url||'')));
+    if (nm) return it._arL={L:nm/100,real:true};
+    return {L:(AR_ROOM_LONG[it.room.name]||80)/100,real:false};
+  }
+  function arBucket(L){ return L<.5?1:L<1?2:L<2?3:4; }
+  function arSizeTxt(z){ return (z.real?'':'≈ ')+(z.L>=1?z.L.toFixed(z.L>=10?0:1)+' m':Math.round(z.L*100)+' cm'); }
+  // paintings with no known size: ask the museum APIs (Art Institute / Met) in the background, 3 at a time, then refresh the grid
+  var arSzQ=[], arSzN=0, arSzT=0;
+  function arRefine(){
+    ROOMS.forEach(function(R){ R.list.forEach(function(it){
+      if (!arEligible(it)||it._arL||it._arQd) return; var c=PINNED[it.t]||cache[it.t]||{}, l=it.link||c.link||'';
+      if (/artic\.edu\/artworks\/\d+|metmuseum\.org\/art\/collection\/search\/\d+/.test(l)){ it._arQd=true; arSzQ.push({it:it,l:l}); } }); });
+    while (arSzN<3 && arSzQ.length) arNext();
+  }
+  function arNext(){
+    var j=arSzQ.shift(); if (!j) return; arSzN++; var p=Object.create(j.it); p.link=j.l;
+    arSize(p).then(function(z){ if (z.real) j.it._arL=z; },function(){}).then(function(){ arSzN--; clearTimeout(arSzT);
+      arSzT=setTimeout(function(){ if (AR.ov && AR.ov.querySelector('#arpick').style.display==='flex' && AR.szf) arPickFill(); },500); if (AR.busy) arNext(); });
+  }
+  // small preview: drawn from the image the gallery already loaded, otherwise the cached (smaller) image URL
+  function arThumb(it){
+    var el=document.createElement('img'), im=it.tex&&it.tex.image&&it.tex.image.width?it.tex.image:null, done=false; el.alt=''; el.className='th';
+    if (it._arTh){ el.src=it._arTh; return el; }
+    if (im){ try{ var c=document.createElement('canvas'), x, k, w, h; c.width=c.height=192; x=c.getContext('2d'); k=Math.min(192/im.width,192/im.height); w=im.width*k; h=im.height*k; x.fillStyle='#2a241c'; x.fillRect(0,0,192,192);   // whole painting, never cropped
+        x.drawImage(im,(192-w)/2,(192-h)/2,w,h); el.src=it._arTh=c.toDataURL('image/jpeg',.72); done=true; }catch(e){} }
+    if (!done){ var u=pinCand(PINNED[it.t]||cache[it.t]); el.loading='lazy'; el.src=(u&&(u.alt||u.url))||''; }
+    return el;
+  }
+  function arPickFill(){
+    var pk=AR.ov.querySelector('#arpick'), l=pk.querySelector('#arpl'), v=pk.querySelector('#arpr').value, all=v==='all', top=l.scrollTop, n=0,
+        Rs=all?ROOMS.filter(function(R){ return R.list.some(arEligible); }):(ROOMS[+v]?[ROOMS[+v]]:[]);
+    l.innerHTML='';
+    Rs.forEach(function(R){
+      var items=R.list.filter(function(it){ return arEligible(it) && (!AR.szf || arBucket(arSizeNow(it).L)===AR.szf); });
+      if (!items.length) return;
+      if (all){ var h=document.createElement('div'); h.className='rh'; h.textContent=rname(R); l.appendChild(h); }
+      items.forEach(function(it){ n++; var z=arSizeNow(it), b=document.createElement('button'), lab=document.createElement('span'); lab.textContent=it.title.replace(/\s*\(.*\)/,'');
+        var sm=document.createElement('small'); sm.textContent=it.artist; lab.appendChild(sm); var sz=document.createElement('small'); sz.textContent=arSizeTxt(z); lab.appendChild(sz);
+        b.appendChild(arThumb(it)); b.appendChild(lab); b.onclick=function(e){ e.stopPropagation(); arAdd(it); }; l.appendChild(b); });
+    });
+    if (!n){ var d=document.createElement('div'); d.className='none'; d.textContent=at(AR.szf?'nosz':'nopick'); l.appendChild(d); }
+    l.scrollTop=top;
+  }
+  // own photo from the phone library (iPhone: Photo Library / Take Photo / Files) hung as a framed piece; real size unknown → 50 cm long side
+  function arPrepareFile(file){ return new Promise(function(res,rej){ var u=URL.createObjectURL(file), im=new Image();
+    im.onload=function(){ URL.revokeObjectURL(u); var W=im.naturalWidth, H=im.naturalHeight; if (!W||!H) return rej(0); var k=Math.min(1,2048/Math.max(W,H)), c=document.createElement('canvas'); c.width=Math.max(1,Math.round(W*k)); c.height=Math.max(1,Math.round(H*k));
+      try{ c.getContext('2d').drawImage(im,0,0,c.width,c.height); }catch(e){ return rej(0); }   // downscaled copy keeps iOS memory low
+      var L=.5, a=c.width/c.height; res({img:c,w:a>=1?L:L*a,h:a>=1?L/a:L,real:false}); };
+    im.onerror=function(){ URL.revokeObjectURL(u); rej(0); }; im.src=u; }); }
+  function arAddFile(file){ arAdd({title:at('photo'),artist:'',mine:true},function(){ return arPrepareFile(file); }); }
+  function arAdd(it,prep){
+    AR.ov.querySelector('#arpick').style.display='none'; if (AR.adding||AR.E) return; AR.adding=true; var sc=AR.scene;
+    (prep?prep():arPrepare(it)).then(function(a){
+      AR.adding=false; if (!AR.busy||AR.scene!==sc||AR.E) return;
+      var E=arEntry(it,a); AR.it=it; AR.E=E; sc.add(E.P); E.P.visible=false; if (AR.sess) E.P.userData.fade(.55);
+      if (AR.ret) AR.ret.visible=false; AR.state=AR.sess?'aim':'base'; arSelect(null); arState();
+    },function(){ AR.adding=false; if (!AR.busy||AR.scene!==sc) return; arToast(at('na')); if (!AR.list.length) arPickerOpen(true); });
+  }
+
+  // ======================= Path A: WebXR immersive-ar (Android Chrome and other WebXR browsers) =======================
+  function arStartXR(it){
+    var ov=arUI('xr'), art=arPrepare(it); art.catch(function(){});
+    navigator.xr.requestSession('immersive-ar',{requiredFeatures:['hit-test'],optionalFeatures:['dom-overlay','anchors'],domOverlay:{root:ov}}).then(function(sess){
+      AR.sess=sess; sess.addEventListener('end',arCleanup);
+      art.then(function(a){ arRunXR(sess,a); },function(){ sess.end(); arFail(); });
+    },function(e){ console.warn('[AR] WebXR refused, using camera fallback',e); AR.busy=true; arStartCam(it); });
+  }
+  function arRunXR(sess,a){
+    var R=AR.r=new THREE.WebGLRenderer({alpha:true,antialias:true}), S=AR.scene=new THREE.Scene(), E=AR.E=arEntry(AR.it,a), P=E.P;
+    R.outputEncoding=THREE.sRGBEncoding; R.xr.enabled=true; R.xr.setReferenceSpaceType('local'); arLights(S);
+    P.matrixAutoUpdate=false; P.visible=false; P.userData.fade(.55); S.add(P);
+    var ret=AR.ret=new THREE.Mesh(new THREE.RingGeometry(.06,.08,32).rotateX(-Math.PI/2),new THREE.MeshBasicMaterial({color:0xf5ba06})); ret.matrixAutoUpdate=false; ret.visible=false; S.add(ret);
+    arTitle();
+    R.xr.setSession(sess).then(function(){
+      sess.requestReferenceSpace('viewer').then(function(vs){ return sess.requestHitTestSource({space:vs}); }).then(function(s){ AR.hit=s; });
+      sess.addEventListener('selectstart',function(ev){ if (AR.state==='placed' && !AR.dr && !AR.pz) arXRDragStart(ev); });
+      sess.addEventListener('selectend',function(ev){ if (AR.dr && AR.dr.src===ev.inputSource) arXRDragEnd(ev); });
+      sess.addEventListener('select',function(ev){ if (AR.state==='aim') AR.tap=true; else if (AR.state==='placed') arPickXR(ev); });
+      AR.ov.classList.add('live'); AR.state='aim'; arState(); R.setAnimationLoop(arXRFrame);
+    }).catch(function(){ sess.end(); arFail(); });
+  }
+  var _M=new THREE.Matrix4(), _p=new THREE.Vector3(), _n=new THREE.Vector3(), _c=new THREE.Vector3(), _x=new THREE.Vector3(), _y=new THREE.Vector3(), _up=new THREE.Vector3(0,1,0);
+  function arXRFrame(t,frame){
+    if (!frame) return;
+    var R=AR.r, ref=R.xr.getReferenceSpace(), i, E=AR.E;
+    if (AR.dr) arXRDrag(frame,ref);
+    AR.list.forEach(function(e){ if (e.anc && !(AR.dr&&AR.dr.e===e&&AR.dr.mv)){ var pp=frame.getPose(e.anc.anchorSpace,ref); if (pp){ e.P.matrix.fromArray(pp.transform.matrix).multiply(e.rel); if (e.k!==1) e.P.matrix.scale(new THREE.Vector3(e.k,e.k,e.k)); e.P.matrixWorldNeedsUpdate=true; } } });   // anchors keep every painting glued to its spot
+    if (!E || AR.state==='placed' || !AR.hit) return;
+    var P=E.P, hs=frame.getHitTestResults(AR.hit), best=null, kind=null, vp=frame.getViewerPose(ref), cam=vp?vp.transform.position:{x:0,y:0,z:0}, bm=null;
+    for (i=0;i<hs.length;i++){                                      // prefer a detected vertical plane (wall); otherwise use the floor as "base of the wall"
+      var po=hs[i].getPose(ref); if (!po) continue; _M.fromArray(po.transform.matrix); var ny=_M.elements[5], k=Math.abs(ny)<.35?'wall':(ny>.7?'floor':null);
+      if (k==='wall'){ best=hs[i]; kind=k; bm=_M.clone(); break; } if (k==='floor' && !best){ best=hs[i]; kind=k; bm=_M.clone(); }
+    }
+    if (!best){ P.visible=false; AR.ret.visible=false; AR.kind=null; arHint(at('scan')); return; }
+    _p.setFromMatrixPosition(bm); _c.set(cam.x-_p.x,cam.y-_p.y,cam.z-_p.z);
+    if (kind==='wall'){ _n.set(bm.elements[4],bm.elements[5],bm.elements[6]); _n.y=0; _n.normalize(); if (_n.dot(_c)<0) _n.negate(); }   // wall normal (hit-pose Y axis), facing the viewer
+    else { _n.copy(_c); _n.y=0; _n.normalize(); }
+    var ctr=_p.clone(); if (kind==='floor') ctr.y+=Math.max(1.45,E.h/2+.1);                          // gallery hanging height: centre ≈ 1.45 m
+    ctr.addScaledVector(_n,.003); _x.crossVectors(_up,_n).normalize(); _y.crossVectors(_n,_x);
+    P.matrix.makeBasis(_x,_y,_n).setPosition(ctr); var relM=AR.tap?bm.clone().invert().multiply(P.matrix):null; if (E.k!==1) P.matrix.scale(new THREE.Vector3(E.k,E.k,E.k)); P.matrixWorldNeedsUpdate=true; P.visible=true;
+    AR.ret.matrix.copy(bm); AR.ret.matrixWorldNeedsUpdate=true; AR.ret.visible=true; AR.kind=kind; arHint(at(AR.list.length&&kind==='floor'?'floor':kind));
+    if (AR.tap){ AR.tap=false; var rel=relM; arCommit(E);
+      if (best.createAnchor){ best.createAnchor().then(function(an){ if (E.dead||AR.E===E||AR.list.indexOf(E)<0){ try{ an.delete(); }catch(x){} return; } E.anc=an; E.rel=rel; }).catch(function(){}); } }   // anchor keeps it glued as tracking improves
+    AR.tap=false;
+  }
+
+  // ======================= Path B: camera fallback (iOS Safari, or any browser without WebXR) =======================
+  // Live camera video + Three.js canvas on top, camera rotation from DeviceOrientation (iOS asks permission here, inside the tap).
+  // No depth sensing: the wall distance is measured from the phone pitch while aiming at the wall/floor line (assumed phone height 1.4 m).
+  function arQ(q,al,be,ga,or){ var e=new THREE.Euler(be,al,-ga,'YXZ'); q.setFromEuler(e); q.multiply(new THREE.Quaternion(-Math.sqrt(.5),0,0,Math.sqrt(.5))); q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1),-or)); }
+  function arFov(){ var w=AR.ov&&AR.ov.clientWidth||innerWidth,h=AR.ov&&AR.ov.clientHeight||innerHeight,r=Math.PI/180,L=63,S=49,a=w/h;    // typical phone main camera: 63° long side, 49° short side
+    if (h>=w) return a<.75 ? L : 2/r*Math.atan(Math.tan(S/2*r)/a); return a>4/3 ? 2/r*Math.atan(Math.tan(L/2*r)/a) : S; }
+  function arStartCam(it){
+    var perm=(typeof DeviceOrientationEvent!=='undefined' && DeviceOrientationEvent.requestPermission) ? DeviceOrientationEvent.requestPermission().catch(function(){ return 'denied'; }) : Promise.resolve('granted');
+    var ov=arUI('fb'), art=arPrepare(it);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.isSecureContext){ arFail('cam'); return; }
+    Promise.all([
+      perm.then(function(p){ if (p!=='granted') throw 'motion'; }),
+      navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false}).then(function(s){ AR.stream=s; return s; },function(){ throw 'cam'; }),
+      art.catch(function(){ throw 'art'; })
+    ]).then(function(r){ try{ arRunCam(r[1],r[2]); }catch(err){ console.warn('[AR]',err); arFail(); } },function(e){ arFail(e); });
+  }
+  function arRunCam(stream,a){
+    var o=AR.ov, v=o.querySelector('#arvid'); v.srcObject=stream; v.play().catch(function(){});
+    var oc=o.querySelector('#arcv'), nc=document.createElement('canvas'); nc.id='arcv'; oc.parentNode.replaceChild(nc,oc);   // fresh canvas = fresh GL context
+    var R=AR.r=new THREE.WebGLRenderer({canvas:nc,alpha:true,antialias:true}), S=AR.scene=new THREE.Scene(), E=AR.E=arEntry(AR.it,a), P=E.P, C=AR.c3=new THREE.PerspectiveCamera(60,1,.05,50);
+    R.outputEncoding=THREE.sRGBEncoding; R.setClearColor(0,0); arLights(S); P.visible=false; S.add(P); C.position.set(0,1.4,0); AR.q=new THREE.Quaternion(); arTitle();
+    AR.onRes=function(){ var W=o.clientWidth||innerWidth, H=o.clientHeight||innerHeight; R.setPixelRatio(Math.min(devicePixelRatio,2)); R.setSize(W,H,false); C.aspect=W/H; C.fov=arFov(); C.updateProjectionMatrix(); }; AR.onRes(); addEventListener('resize',AR.onRes);
+    AR.ori={ok:false,a:0,b:0,g:0};
+    AR.onOri=function(e){ if (e.beta==null) return; var d=AR.ori; d.a=e.alpha||0; d.b=e.beta; d.g=e.gamma||0; if (!d.ok){ d.ok=true; AR.first=true; } }; addEventListener('deviceorientation',AR.onOri);
+    var ori0=AR.ori; setTimeout(function(){ if (AR.busy && AR.ori===ori0 && !ori0.ok) arFail('motion'); },2500);   // desktop browsers never deliver real sensor data
+    AR.ov.classList.add('live'); AR.state='base'; arState();
+    (function loop(){ AR.raf=requestAnimationFrame(loop); var d=AR.ori;
+      if (d.ok){ var k=Math.PI/180; arQ(AR.q,d.a*k,d.b*k,d.g*k,((screen.orientation&&screen.orientation.angle)||window.orientation||0)*k); if (AR.first){ C.quaternion.copy(AR.q); AR.first=false; } else { var ang=C.quaternion.angleTo(AR.q); if (ang>.0012) C.quaternion.slerp(AR.q,Math.min(.7,Math.max(.12,ang*14))); } }
+      R.render(S,C);
+      if (AR.snap){ AR.snap=false; var hv=AR.list.map(function(e){ return e.P.userData.hl.visible; }); AR.list.forEach(function(e){ e.P.userData.hl.visible=false; });   // photos never show the selection outline
+        R.render(S,C); arCompose(); AR.list.forEach(function(e,k){ e.P.userData.hl.visible=hv[k]; }); } })();
+  }
+  function arLay(e){ var f=e.fb, P=e.P; P.position.set(f.x,f.y,f.z); P.rotation.y=f.yaw; P.scale.setScalar(e.k); P.visible=true; arDist(); }
+  function arDist(){ var e=AR.sel||AR.E; if (AR.ov && e && e.fb) AR.ov.querySelector('#ardist').textContent=Math.hypot(e.fb.x,e.fb.z).toFixed(1)+' m'; }
+  function arSetWall(){
+    var E=AR.E; if (!E) return;
+    var d=new THREE.Vector3(0,0,-1).applyQuaternion(AR.c3.quaternion), hl=Math.hypot(d.x,d.z), hx=hl>.01?d.x/hl:0, hz=hl>.01?d.z/hl:-1, ref=AR.list[0], f=null;
+    if (ref && ref.fb){      // 2nd painting onwards: hang it on the same wall plane as the first, where the phone is aimed (so they line up like a real gallery wall)
+      var ny=Math.sin(ref.fb.yaw), nz=Math.cos(ref.fb.yaw), c=ny*ref.fb.x+nz*ref.fb.z, dn=ny*d.x+nz*d.z, t=dn<-.1?c/dn:0;
+      if (t>.3 && t<14) f={x:t*d.x,y:Math.max(.25,Math.min(3.2,1.4+t*d.y)),z:t*d.z,yaw:ref.fb.yaw};
+    }
+    if (!f){                 // first painting: wall distance from the phone pitch toward the wall/floor line
+      var dist=2; if (d.y<-.1) dist=1.4/Math.tan(Math.asin(-d.y));                  // aimed at the floor line: distance = phone height / tan(downward pitch)
+      dist=Math.max(.6,Math.min(6,dist));
+      f={x:hx*dist,y:Math.max(1.45,E.h/2+.1),z:hz*dist,yaw:Math.atan2(-hx,-hz)};
+    }
+    E.fb=f; arLay(E); arCommit(E);
+  }
+  function arNudge(dd){ var e=AR.sel; if (!e||!e.fb) return; var f=e.fb, l=Math.hypot(f.x,f.z)||1, k=Math.max(.4,Math.min(8,l+dd))/l; f.x*=k; f.z*=k; arLay(e); }
+
+  // ---- the button on the painting's info plate ----
+  function arAddBtn(it){
+    if (it.emb || it.anon || /Sculpture/.test(it.room.name) || !(AR.xr || (window.isSecureContext && matchMedia('(pointer:coarse)').matches))) return;
+    var b=document.createElement('button'); b.className='room arbtn'; b.textContent=at('btn'); b.onclick=function(e){ e.stopPropagation(); arOpen(it); };
+    cap.insertBefore(b,cap.querySelector('.inf')); arSync();
+  }
+  function arSync(){ var b=cap.querySelector('.arbtn'); if (b && cur && b.disabled!==!(cur.it.tex&&cur.it.tex.image)){ b.disabled=!(cur.it.tex&&cur.it.tex.image); } }   // enabled once the image has loaded
+  // ---------- Wink: the portrait's LEFT eye blinks while you stand in front of it ----------
+  // WINK_SIDE 'left' = the sitter's own left eye (it appears on the RIGHT as you look at the painting). Use 'right' for the other eye.
+  // Face landmarks come from MediaPipe Face Landmarker, loaded the first time a portrait is viewed; results are cached on the device.
+  // EYE_PIN is an optional manual fix for a portrait that is not detected:  "Title — Artist": [centreX, centreY, eyeWidth]  (all 0..1 of the image).
+  var WINK_SIDE='left', EYE_PIN={}, EYE_KEY='facepro-eyes-v1', ecache={}, FL=null, flP=null, flFail=false, eyeChain=Promise.resolve(), lastBk=null, bT=0;
+  try{ ecache=JSON.parse(localStorage.getItem(EYE_KEY)||'{}'); }catch(e){}
+  var EYEIDX={left:{up:[362,398,384,385,386,387,388,466,263], lo:[362,382,381,380,374,373,390,249,263]},
+              right:{up:[133,173,157,158,159,160,161,246,33], lo:[133,155,154,153,145,144,163,7,33]}};
+  function flLoad(){
+    if (flP) return flP;
+    var base='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+    flP=import(base+'/vision_bundle.mjs').then(function(m){
+      return m.FilesetResolver.forVisionTasks(base+'/wasm').then(function(fs){
+        return m.FaceLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',delegate:'CPU'},
+          runningMode:'IMAGE',numFaces:1,minFaceDetectionConfidence:.2,minFacePresenceConfidence:.2,minTrackingConfidence:.2}); });
+    }).then(function(f){ FL=f; return f; }).catch(function(){ flFail=true; return null; });
+    return flP;
+  }
+  function synthEye(p,asp){
+    var cx=p[0], cy=p[1], w=p[2], hh=w*.2*asp, u=[], l=[];
+    for (var i=0;i<9;i++){ var t=i/8, x=cx-w/2+w*t, s=Math.sin(Math.PI*t); u.push([x,cy-hh*s]); l.push([x,cy+hh*.7*s]); }
+    return {u:u,l:l};
+  }
+  function eyeFor(it){
+    if (it.eye!==undefined || it.eyeP) return;
+    var img=it.tex&&it.tex.image, pin=EYE_PIN[it.t], ck=it.t+'|'+WINK_SIDE;
+    if (!img||!img.width) return;
+    if (pin){ it.eye=synthEye(pin,img.width/img.height); return; }
+    if (ecache[ck]!==undefined){ it.eye=ecache[ck]; return; }
+    if (flFail) return;
+    it.eyeP=true;
+    eyeChain=eyeChain.then(function(){ return flLoad(); }).then(function(f){
+      if (!f){ it.eyeP=false; return; }
+      var r=f.detect(img), L=r&&r.faceLandmarks&&r.faceLandmarks[0], eye=null;
+      if (L){
+        var I=EYEIDX[WINK_SIDE], m=function(i){ return [Math.round(L[i].x*10000)/10000, Math.round(L[i].y*10000)/10000]; };
+        eye={u:I.up.map(m), l:I.lo.map(m)};
+        if (Math.abs(eye.u[8][0]-eye.u[0][0])*img.width<5) eye=null;      // face far too small to animate
+      }
+      it.eye=eye; it.eyeP=false; ecache[ck]=eye; try{ localStorage.setItem(EYE_KEY,JSON.stringify(ecache)); }catch(e){}
+    }).catch(function(){ it.eyeP=false; });
+  }
+  function skinAt(img,cx,cy,s){
+    try{ var c=document.createElement('canvas'); c.width=c.height=4; var g=c.getContext('2d'); s=Math.max(2,s);
+      g.drawImage(img,Math.max(0,cx-s/2),Math.max(0,cy-s/2),Math.min(s,img.width),Math.min(s,img.height),0,0,4,4);
+      var d=g.getImageData(0,0,4,4).data, r=0,gg=0,b=0,n=16; for (var i=0;i<n;i++){ r+=d[i*4]; gg+=d[i*4+1]; b+=d[i*4+2]; } return [r/n,gg/n,b/n]; }catch(e){ return [200,154,120]; }
+  }
+  function blinkMake(it){
+    var img=it.tex.image, W=img.width, H=img.height, e=it.eye, P=function(p){ return [p[0]*W,p[1]*H]; }, U=e.u.map(P), Lw=e.l.map(P), all=U.concat(Lw);
+    var x0=1e9,y0=1e9,x1=-1e9,y1=-1e9; all.forEach(function(p){ x0=Math.min(x0,p[0]); x1=Math.max(x1,p[0]); y0=Math.min(y0,p[1]); y1=Math.max(y1,p[1]); });
+    var ew=x1-x0, eh=Math.max(y1-y0,ew*.12), px=ew*.3, py=eh*.9, bx=x0-px, by=y0-py, bw=ew+2*px, bh=(y1-y0)+2*py, sc=Math.min(4,Math.max(1,96/bw));
+    var c=document.createElement('canvas'); c.width=Math.max(8,Math.ceil(bw*sc)); c.height=Math.max(8,Math.ceil(bh*sc));
+    var mx=(U[4][0]+Lw[4][0])/2, uy=U[4][1], ly=Lw[4][1], s1=skinAt(img,mx,uy-eh*.7,ew*.25), s2=skinAt(img,mx,ly+eh*.9,ew*.25), k=[0,1,2].map(function(i){ return Math.round((s1[i]*.6+s2[i]*.4)); });
+    var tex=new THREE.CanvasTexture(c), mesh=new THREE.Mesh(new THREE.PlaneGeometry(bw/W,bh/H), new THREE.MeshBasicMaterial({map:tex,transparent:true,depthWrite:false}));
+    mesh.position.set((bx+bw/2)/W-.5, .5-(by+bh/2)/H, .004); mesh.visible=false;
+    it.bk={c:c,g:c.getContext('2d'),tex:tex,mesh:mesh,U:U,L:Lw,bx:bx,by:by,sc:sc,eh:y1-y0,cx:(x0+x1)/2,cy:(y0+y1)/2,skin:'rgb('+k.join(',')+')',line:'rgb('+k.map(function(v){ return Math.round(v*.45); }).join(',')+')',next:bT+1+Math.random()*1.5,t0:-1,p:0};
+  }
+  function blinkDraw(b,p){
+    var g=b.g, n=b.U.length, i;
+    g.clearRect(0,0,b.c.width,b.c.height); if (p<=0) return;
+    var X=function(q){ return [((b.cx+(q[0]-b.cx)*1.1)-b.bx)*b.sc, ((b.cy+(q[1]-b.cy)*1.14)-b.by)*b.sc]; }, up=[], ed=[];
+    for (i=0;i<n;i++){ var u=b.U[i], l=b.L[i]; up.push(X(u)); ed.push(X([u[0]+(l[0]-u[0])*p, u[1]+(l[1]-u[1])*p])); }
+    g.beginPath(); up.forEach(function(q,k){ k?g.lineTo(q[0],q[1]):g.moveTo(q[0],q[1]); }); for (i=n-1;i>=0;i--) g.lineTo(ed[i][0],ed[i][1]); g.closePath();
+    g.fillStyle=b.skin; g.shadowColor=b.skin; g.shadowBlur=2*b.sc; g.fill(); g.shadowBlur=0;
+    if (p>.2){ g.beginPath(); ed.forEach(function(q,k){ k?g.lineTo(q[0],q[1]):g.moveTo(q[0],q[1]); }); g.strokeStyle=b.line; g.lineWidth=Math.max(1,b.eh*.1*b.sc); g.lineCap='round'; g.lineJoin='round'; g.stroke(); }
+  }
+  function blinkTick(dt){
+    bT+=dt;
+    var it=cur&&cur.it, b=it&&it.bk;
+    if (lastBk && lastBk!==b){ lastBk.mesh.visible=false; lastBk.p=0; lastBk.t0=-1; lastBk=null; }
+    if (!it || it.emb) return;
+    eyeFor(it);
+    if (!it.eye || !it.mesh || !it.tex || !it.tex.image) return;
+    if (!b){ try{ blinkMake(it); }catch(e){ it.eye=null; return; } b=it.bk; }
+    if (b.mesh.parent!==it.mesh) it.mesh.add(b.mesh);
+    lastBk=b;
+    if (b.t0<0 && bT>=b.next) b.t0=bT;
+    var p=0;
+    if (b.t0>=0){
+      var u=(bT-b.t0)/.42, sm=function(s){ return s*s*(3-2*s); };
+      if (u>=1){ b.t0=-1; b.next=bT+2.4+Math.random()*3.2; }
+      else p=u<.34?sm(u/.34):(u<.54?1:1-sm((u-.54)/.46));
+    }
+    if (p!==b.p){ b.p=p; blinkDraw(b,p); b.tex.needsUpdate=true; b.mesh.visible=p>0; }
+  }
+  function tick(){
+    if (AR.busy){ clock.getDelta(); requestAnimationFrame(tick); return; }   // gallery is paused while AR is open
+    var dt=Math.min(clock.getDelta(),.05), sp=(keys.ShiftLeft?6:3.4)*dt;
+    var f=(keys.KeyW||keys.ArrowUp?1:0)-(keys.KeyS||keys.ArrowDown?1:0), s=(keys.KeyD?1:0)-(keys.KeyA?1:0);
+    if (tour && (f||s||keys.ArrowLeft||keys.ArrowRight)) stopTour();
+    var p=camera.position;
+    if (tour){ if (!tour.paused) tourStep(dt*SPEEDS[tour.si],p); }
+    else {
+      if (nav && (f||s||keys.ArrowLeft||keys.ArrowRight)) nav=null;
+      if (nav){
+        var nx=nav.x-p.x, nz=nav.z-p.z, nd=Math.hypot(nx,nz), ny=wrapA(nav.yaw-yaw);
+        yaw+=Math.max(-3*dt,Math.min(3*dt,ny)); pitch+=(nav.pitch-pitch)*Math.min(1,4*dt);
+        if (nd>0.05){ var nk=Math.abs(ny)<0.9?1:0.2, ns=Math.min(nd,4.5*nk*dt); p.x+=nx/nd*ns; p.z+=nz/nd*ns; }
+        if (nd<=0.06 && Math.abs(ny)<0.03) nav=null;
+      } else {
+        if (keys.ArrowLeft) yaw+=1.6*dt; if (keys.ArrowRight) yaw-=1.6*dt;
+        p.x+=(-Math.sin(yaw)*f+Math.cos(yaw)*s)*sp; p.z+=(-Math.cos(yaw)*f-Math.sin(yaw)*s)*sp;
+      }
+    }
+    p.x=Math.max(-5,Math.min(5,p.x)); p.z=Math.max(-half+1.2,Math.min(half-1.2,p.z));
+    camera.rotation.set(pitch,yaw,0);
+    var best=null, bd=Math.max(5.5,tourDist()+1.2), fx=-Math.sin(yaw), fz=-Math.cos(yaw);
+    stations.forEach(function(st){ var dx=st.pos.x-p.x, dz=st.pos.z-p.z, d=Math.hypot(dx,dz); if (d<bd && (dx*fx+dz*fz)/d>.45){ bd=d; best=st; } });
+    if (best!==cur){ cur=best; if (!tour && readIt && (!best || best.it!==readIt)) hush();
+      if (cur){ var it=cur.it; cap.style.display='block';
+        cap.innerHTML='<b></b><div class="inf"></div><a target="_blank" rel="noopener"></a><small></small>'; cap.querySelector('small').textContent=tx('press');
+        cap.querySelector('b').textContent=it.t; fetchInfo(it); showInfo(it); var a=cap.querySelector('a'); a.href=it.link||'#'; a.textContent=it.link||tx('searching'); arAddBtn(it); }
+      else cap.style.display='none'; }
+    else if (cur){ arSync(); var a2=cap.querySelector('a'); if (a2 && cur.it.link && a2.getAttribute('href')!==cur.it.link){ a2.href=cur.it.link; a2.textContent=cur.it.link; } }
+    var mv=Math.hypot(p.x-pX,p.z-pZ)>0.003 || Math.abs(yaw-pYaw)>0.003 || !!nav; pX=p.x; pZ=p.z; pYaw=yaw; idleT=mv?0:idleT+dt;
+    if (!cur) readIt=null;
+    blinkTick(dt);
+    if (readIt && lbEl.style.display!=='none') lbEl.style.display='none';
+    if (!tour && cur && rd.on && SS && gest && intro.style.display==='none' && srch.style.display!=='block' && idleT>0.8 && readIt!==cur.it){
+      var it0=cur.it, wait0=infoOn && !it0.emb && it0.inf===undefined;
+      if (wait0) fetchInfo(it0);
+      if (!wait0 || idleT>4){ readIt=it0; lastArtist=''; say(spoken(it0)+infoSpeech(it0)); }
+    }
+    renderer.render(scene,camera); requestAnimationFrame(tick);
+  }
+// phone layout: fold the secondary buttons behind a menu button, and put walking + previous/next in one row above the card
+  (function(){
+    var hud=document.getElementById('hud'), pad=document.getElementById('pad'), pw=pad.querySelector('.wrap');
+    hud.insertBefore(pad, cap);
+    [['pnext','▶︎','next painting (N)',1],['pprev','◀︎','previous painting (P)',-1]].forEach(function(a){ var b=document.createElement('button'); b.id=a[0]; b.textContent=a[1]; b.title=a[2]; b.onclick=function(){ artStep(a[3]); }; pw.insertBefore(b,pw.firstChild); });
+    function fold(bar,keep,before){ [].forEach.call(bar.children,function(c){ if (keep.indexOf(c)<0) c.classList.add('fold'); });
+      var b=document.createElement('button'); b.className='room mtog'; b.textContent='☰'; b.setAttribute('aria-label','Menu'); b.onclick=function(){ bar.classList.toggle('open'); };
+      bar.insertBefore(b,before||null); }
+    fold(roomsEl,[roomsEl.querySelector('.brand'),rsel],rsel.nextSibling);
+    var tbar=document.getElementById('tourbar'); fold(tbar,[tbar.querySelector('.brand'),document.getElementById('tpause'),document.getElementById('tstop')],null);
+    roomsEl.addEventListener('click',function(e){ var b=e.target.closest&&e.target.closest('button'); if (b && b.classList.contains('fold') && !b.closest('.langsw')) roomsEl.classList.remove('open'); });
+    rsel.addEventListener('change',function(){ roomsEl.classList.remove('open'); });
+  })();
+  var lbEl=document.createElement('button'); lbEl.id='listen'; lbEl.setAttribute('data-i','listen'); lbEl.innerHTML=tx('listen'); document.body.appendChild(lbEl);
+  // Speech must start inside the tap itself (iPhone blocks it otherwise). Everything is spoken as ONE utterance when the card text is
+  // already loaded (it is fetched as soon as the page opens); otherwise the card text follows when the title has finished.
+  var KEEP=[];
+  function utter(text,done){
+    var u=new SpeechSynthesisUtterance(text), ok=false; u.lang=tx('speech'); u.volume=1; u.rate=1;
+    KEEP.push(u); if (KEEP.length>6) KEEP.shift();                      // keep a reference so Safari does not drop it mid-speech
+    rd.cur=u; rd.busy=true; u.onstart=function(){ ok=true; };
+    u.onend=u.onerror=function(){ if (rd.cur!==u) return; rd.busy=false; if (done) done(); };
+    SS.speak(u); return function(){ return ok; };
+  }
+  lbEl.onclick=function(){
+    gest=true; lbEl.style.display='none'; lbEl.innerHTML=tx('listen'); var it=waItem(); if (!it || !SS || !rd.on) return;
+    unlocked=true; readIt=it; lastArtist='';
+    try{ if (SS.speaking||SS.pending) SS.cancel(); if (SS.paused) SS.resume(); }catch(e){}
+    var ready=!infoOn || it.emb || it.inf!==undefined, started;
+    function later(){ var n=0; (function w(){
+      if (infoOn && !it.emb && it.inf===undefined && n++<40){ fetchInfo(it); return setTimeout(w,150); }
+      var t=infoSpeech(it).replace(/^\.\s*/,''); if (t && rd.on && readIt===it) try{ utter(t); }catch(e){} })(); }
+    try{ started=utter(spoken(it)+(ready?infoSpeech(it):''), ready?null:later); }catch(e){ return; }
+    setTimeout(function(){ if (!started() && readIt===it && !(SS.speaking)){ readIt=null; lbEl.textContent=tx('listenFail'); lbEl.style.display='block'; } },3500);   // never started: silent switch / volume
+  };
+var IOS=/iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+  document.getElementById('enter').addEventListener('click', function(){ idleT=0; readIt=null; });   // after ENTER, read the painting we are standing at
+  function openFromHash(){
+    var m={}; location.hash.replace(/^#/,'').split('&').forEach(function(kv){ var a=kv.split('='); if (a[0]) try{ m[a[0]]=decodeURIComponent(a[1]||''); }catch(e){} });
+    var ri=-1, item=null;
+    if (m.r) ROOMS.forEach(function(R,i){ if (ri<0 && slug(R.name)===m.r) ri=i; });
+    if (ri>=0 && m.a) item=ROOMS[ri].list.filter(function(it){ return !it.emb && (slug(it.qt)===m.a || slug(it.title)===m.a); })[0];
+    if (ri<0) return false;
+    lastAct=Date.now();
+    if (!gest) intro.style.display='flex';        // shared link: always keep the start screen, its ENTER tap unlocks the voice (needed on iPhone), then the painting is read automatically
+    else intro.style.display='none';                // already interacted (link changed while inside the gallery): go straight to the painting
+    enterRoom(ri);
+    if (item){
+      var st=stations.filter(function(q){ return q.it===item; })[0];
+      fetchInfo(item); if (st){ linkItem=item; placeAt(item); linked=true; if (tour) stopTour(); }
+    }
+    return true;
+  }
+  if (!openFromHash()) enterRoom(Math.floor(Math.random()*ROOMS.length));
+  addEventListener('hashchange', openFromHash);
+  // ---------- PWA: install button (only when the browser offers it), iOS hint, service worker ----------
+  (function(){
+    var dp=null, standalone=(window.matchMedia&&matchMedia('(display-mode: standalone)').matches)||navigator.standalone===true;
+    var b1=document.getElementById('install'), hint=document.getElementById('iosHint');
+    var b2=document.createElement('button'); b2.id='minst'; b2.type='button'; b2.className='room inst fold'; b2.setAttribute('data-i','install'); b2.innerHTML=tx('install'); roomsEl.insertBefore(b2, document.getElementById('tour'));
+    function show(on){ [b1,b2].forEach(function(b){ b.classList.toggle('show',on); }); }
+    function ask(){ if (!dp) return; var p=dp; dp=null; show(false); try{ p.prompt(); }catch(e){} }
+    b1.onclick=ask; b2.onclick=ask;
+    addEventListener('beforeinstallprompt', function(e){ e.preventDefault(); if (standalone) return; dp=e; show(true); });
+    addEventListener('appinstalled', function(){ dp=null; show(false); hint.classList.remove('show'); });
+    if (IOS && !standalone) hint.classList.add('show');
+    if ('serviceWorker' in navigator){ navigator.serviceWorker.register('./facepro-sw.js'); }
+  })();
+  tick();
+})();
+</script>
+</body>
+</html>
